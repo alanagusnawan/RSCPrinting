@@ -1,0 +1,48 @@
+mode: agent  # agent | standalone
+
+server:
+  host: 127.0.0.1  # 127.0.0.1 untuk production; 0.0.0.0 hanya untuk debugging LAN
+  port: 8080
+  enable_local_print_endpoint: false  # aktifkan hanya untuk standalone / testing
+
+ws_server:
+  url: ""  # kosong = baca dari ./data/config atau env PRINT_AGENT_WS_URL (default: ws://localhost:5488/agent/ws)
+  token: ""  # kosong = generate otomatis dan simpan di ./data/config atau env PRINT_AGENT_WS_TOKEN
+  reconnectBackoffMax: 60s
+  handshakeTimeout: 15s
+  pingInterval: 30s
+  welcomeTimeout: 10s
+
+agent:
+  id: ""              # UUID, generate otomatis jika kosong (disimpan di ./data/config)
+  displayName: ""     # "Kasir Depan" dsb.
+
+printers:
+  defaultName: ""
+  allowlist: []
+  pollInterval: 5m    # deteksi perubahan daftar printer
+
+ghostscript:
+  path: ""  # kosong = auto-detect (Windows)
+
+logging:
+  level: info
+  format: json
+  file: ""
+
+queue:
+  maxSizePerPrinter: 10
+  jobTimeout: 60s
+  maxConcurrentPerPrinter: 1
+
+updater:
+  enabled: false
+  owner: ""
+  repo: ""
+  token: ""
+  checkInterval: 6h
+  prerelease: false
+
+tray:
+  enabled: true
+  startMinimized: true
