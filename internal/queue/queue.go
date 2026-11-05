@@ -89,6 +89,10 @@ func (m *Manager) Execute(ctx context.Context, printerName string, fn func(ctx c
 	case err := <-done:
 		return err
 	case <-execCtx.Done():
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+		}
 		if errors.Is(execCtx.Err(), context.DeadlineExceeded) {
 			return ErrPrinterTimeout
 		}

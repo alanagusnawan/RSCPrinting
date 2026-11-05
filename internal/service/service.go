@@ -18,8 +18,8 @@ type Config struct {
 
 func GetServiceConfig(args []string) *service.Config {
 	return &service.Config{
-		Name:        "PrintAgent",
-		DisplayName: "Print Agent",
+		Name:        "RSCPrinting",
+		DisplayName: "RSCPrinting",
 		Description: "Client-only WebSocket print agent for local printing",
 		Arguments:   args,
 		Option: service.KeyValue{

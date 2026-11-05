@@ -101,6 +101,8 @@ Binary hasil kompilasi akan berada di folder `dist/`.
 ## Local Debug HTTP API
 Agent membuka loopback listener di `127.0.0.1:8080`:
 - `GET /health`: Status WebSocket, versi, daftar printer lokal.
+- `GET /docs`: Swagger UI dokumentasi API interaktif.
+- `GET /swagger.json`: Spesifikasi OpenAPI / Swagger 2.0.
 - `GET /version`: Informasi versi dan commit build.
 - `GET /printers`: Daftar printer yang terpasang di OS.
 - `GET /jobs/{id}`: Status pemrosesan job lokal.

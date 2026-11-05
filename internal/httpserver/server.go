@@ -2,6 +2,7 @@ package httpserver
 
 import (
 	"context"
+	_ "embed"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -18,6 +19,9 @@ import (
 	"github.com/rscprinting/print-agent/pkg/apitypes"
 	"golang.org/x/exp/slog"
 )
+
+//go:embed swagger.json
+var swaggerJSON []byte
 
 type Server struct {
 	cfg          config.Config
@@ -41,6 +45,9 @@ func New(cfg config.Config, c *wsclient.Client, p printer.Printer, qm *queue.Man
 	mux.HandleFunc("/printers", s.handlePrinters)
 	mux.HandleFunc("/jobs/", s.handleJobs)
 	mux.HandleFunc("/print", s.handlePrint)
+	mux.HandleFunc("/docs", s.handleDocs)
+	mux.HandleFunc("/docs/", s.handleDocs)
+	mux.HandleFunc("/swagger.json", s.handleSwaggerJSON)
 
 	addr := fmt.Sprintf("%s:%d", cfg.Server.Host, cfg.Server.Port)
 	s.httpServer = &http.Server{
@@ -171,7 +178,7 @@ func (s *Server) handlePrint(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "failed to write temp file", http.StatusInternalServerError)
 		return
 	}
-	_ = tmp.Close()
+	_ = tmp.Close() 
 
 	jobID := fmt.Sprintf("local-%d", time.Now().UnixNano())
 	printErr := s.queueManager.Execute(r.Context(), targetPrinter, func(execCtx context.Context) error {
@@ -202,3 +209,60 @@ func writeJSON(w http.ResponseWriter, code int, val interface{}) {
 	w.WriteHeader(code)
 	_ = json.NewEncoder(w).Encode(val)
 }
+
+func (s *Server) handleSwaggerJSON(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	if r.Method == http.MethodGet {
+		_, _ = w.Write(swaggerJSON)
+	}
+}
+
+func (s *Server) handleDocs(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	if r.Method == http.MethodGet {
+		_, _ = w.Write([]byte(swaggerUIHTML))
+	}
+}
+
+const swaggerUIHTML = `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>RSCPrinting API Docs</title>
+  <link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist@5/swagger-ui.css">
+  <style>
+    html { box-sizing: border-box; overflow-y: scroll; }
+    *, *:before, *:after { box-sizing: inherit; }
+    body { margin: 0; background: #fafafa; }
+  </style>
+</head>
+<body>
+  <div id="swagger-ui"></div>
+  <script src="https://unpkg.com/swagger-ui-dist@5/swagger-ui-bundle.js"></script>
+  <script src="https://unpkg.com/swagger-ui-dist@5/swagger-ui-standalone-preset.js"></script>
+  <script>
+    window.onload = function() {
+      SwaggerUIBundle({
+        url: "/swagger.json",
+        dom_id: '#swagger-ui',
+        deepLinking: true,
+        presets: [
+          SwaggerUIBundle.presets.apis,
+          SwaggerUIStandalonePreset
+        ],
+        layout: "StandaloneLayout"
+      });
+    };
+  </script>
+</body>
+</html>`

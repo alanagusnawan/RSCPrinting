@@ -25,6 +25,7 @@ type Config struct {
 	Updater     UpdaterConfig     `yaml:"updater"`
 	Tray        TrayConfig        `yaml:"tray"`
 	DataDir     string            `yaml:"dataDir"`
+	ConfigPath  string            `yaml:"-"`
 }
 
 type ServerConfig struct {
@@ -124,9 +125,9 @@ func DefaultConfig() Config {
 			MaxConcurrentPerPrinter: 1,
 		},
 		Updater: UpdaterConfig{
-			Enabled:       false,
-			Owner:         "",
-			Repo:          "",
+			Enabled:       true,
+			Owner:         "alanagusnawan",
+			Repo:          "RSCPrinting",
 			Token:         "",
 			CheckInterval: 6 * time.Hour,
 			Prerelease:    false,
@@ -141,6 +142,7 @@ func DefaultConfig() Config {
 
 func Load(path string) (Config, error) {
 	cfg := DefaultConfig()
+	cfg.ConfigPath = path
 
 	if path != "" {
 		if data, err := os.ReadFile(path); err == nil {

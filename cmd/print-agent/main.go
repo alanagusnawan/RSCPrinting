@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/exec"
 	"os/signal"
 	"syscall"
 	"time"
@@ -58,7 +59,7 @@ func main() {
 }
 
 func printUsage() {
-	fmt.Println(`Print Agent - Client-Only WebSocket Print Agent
+	fmt.Println(`RSCPrinting - Client-Only WebSocket Print Agent
 
 Usage:
   print-agent <command> [arguments]
@@ -75,7 +76,7 @@ Commands:
 
 func cmdVersion(_ []string) {
 	v := version.Get()
-	fmt.Printf("Print Agent %s (commit: %s, built: %s)\n", v.Version, v.GitCommit, v.BuildDate)
+	fmt.Printf("RSCPrinting %s (commit: %s, built: %s)\n", v.Version, v.GitCommit, v.BuildDate)
 }
 
 func cmdPrinters(args []string) {
@@ -123,16 +124,28 @@ func cmdTest(args []string) {
 		os.Exit(1)
 	}
 
-	// Minimal PDF content
-	testPDF := "%PDF-1.4\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n3 0 obj<</Type/Page/MediaBox[0 0 595 842]/Parent 2 0 R/Resources<<>>>>endobj\nxref\n0 4\n0000000000 65535 f \n0000000009 00000 n \n0000000052 00000 n \n0000000101 00000 n \ntrailer<</Size 4/Root 1 0 R>>\nstartxref\n178\n%%EOF\n"
+	// Test page content with visible text
+	testContent := "%!PS-Adobe-3.0\n" +
+		"/Helvetica-Bold findfont 24 scalefont setfont\n" +
+		"50 750 moveto\n" +
+		"(RSCPrinting Test Page) show\n" +
+		"/Helvetica findfont 14 scalefont setfont\n" +
+		"50 710 moveto\n" +
+		"(Printer: " + printerName + ") show\n" +
+		"50 680 moveto\n" +
+		"(Status: OK - Print Agent Connected) show\n" +
+		"50 660 moveto\n" +
+		"500 660 lineto\n" +
+		"stroke\n" +
+		"showpage\n"
 
-	tmp, err := os.CreateTemp("", "test-print-*.pdf")
+	tmp, err := os.CreateTemp("", "test-print-*.ps")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "create temp file failed: %v\n", err)
 		os.Exit(1)
 	}
 	defer os.Remove(tmp.Name())
-	_, _ = tmp.WriteString(testPDF)
+	_, _ = tmp.WriteString(testContent)
 	_ = tmp.Close()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -406,6 +419,13 @@ func runAgentWithMode(ctx context.Context, configPath, modeOverride string) {
 	if cfg.Tray.Enabled {
 		t := tray.New(cfg, wsClient, func() {
 			log.Info("restart requested from tray")
+			store.Close()
+			exe, err := os.Executable()
+			if err == nil {
+				cmd := exec.Command(exe, os.Args[1:]...)
+				_ = cmd.Start()
+			}
+			os.Exit(0)
 		}, func() {
 			log.Info("manual update check requested from tray")
 			checkCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)

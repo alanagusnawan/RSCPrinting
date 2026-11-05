@@ -59,6 +59,22 @@ func TestLocalHTTPServerEndpoints(t *testing.T) {
 		t.Fatalf("printers endpoint returned %d", rrPrinters.Code)
 	}
 
+	// Test GET /docs
+	reqDocs := httptest.NewRequest(http.MethodGet, "/docs", nil)
+	rrDocs := httptest.NewRecorder()
+	srv.ServeHTTP(rrDocs, reqDocs)
+	if rrDocs.Code != http.StatusOK {
+		t.Fatalf("docs endpoint returned %d", rrDocs.Code)
+	}
+
+	// Test GET /swagger.json
+	reqSwagger := httptest.NewRequest(http.MethodGet, "/swagger.json", nil)
+	rrSwagger := httptest.NewRecorder()
+	srv.ServeHTTP(rrSwagger, reqSwagger)
+	if rrSwagger.Code != http.StatusOK {
+		t.Fatalf("swagger.json endpoint returned %d", rrSwagger.Code)
+	}
+
 	// Test POST /print is forbidden when disabled
 	reqPrint := httptest.NewRequest(http.MethodPost, "/print", nil)
 	rrPrint := httptest.NewRecorder()

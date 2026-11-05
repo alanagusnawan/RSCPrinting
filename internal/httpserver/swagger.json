@@ -1,0 +1,164 @@
+{
+  "swagger": "2.0",
+  "info": {
+    "title": "RSCPrinting API",
+    "description": "Local HTTP Debug & Print API for RSCPrinting Agent",
+    "version": "1.0.0"
+  },
+  "basePath": "/",
+  "schemes": ["http"],
+  "consumes": ["application/json"],
+  "produces": ["application/json"],
+  "paths": {
+    "/health": {
+      "get": {
+        "summary": "Health and agent status",
+        "tags": ["System"],
+        "responses": {
+          "200": {
+            "description": "Agent status and connected printers",
+            "schema": {
+              "type": "object",
+              "properties": {
+                "status": {"type": "string", "example": "ok"},
+                "wsStatus": {"type": "string", "example": "Connected"},
+                "wsDetail": {"type": "string", "example": ""},
+                "agentId": {"type": "string", "example": "3f61220a-dcc2-4fde-a0d3-53905ca6e5cf"},
+                "version": {"type": "string", "example": "1.0.0"},
+                "mode": {"type": "string", "example": "agent"},
+                "timestamp": {"type": "string", "example": "2026-11-05T05:58:00Z"},
+                "printers": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "name": {"type": "string"},
+                      "isDefault": {"type": "boolean"},
+                      "status": {"type": "string"}
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/version": {
+      "get": {
+        "summary": "Get version and build info",
+        "tags": ["System"],
+        "responses": {
+          "200": {
+            "description": "Version info",
+            "schema": {
+              "type": "object",
+              "properties": {
+                "version": {"type": "string"},
+                "gitCommit": {"type": "string"},
+                "buildDate": {"type": "string"}
+              }
+            }
+          }
+        }
+      }
+    },
+    "/printers": {
+      "get": {
+        "summary": "List available local OS printers",
+        "tags": ["Printers"],
+        "responses": {
+          "200": {
+            "description": "List of printers",
+            "schema": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "name": {"type": "string"},
+                  "isDefault": {"type": "boolean"},
+                  "status": {"type": "string"}
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/jobs/{id}": {
+      "get": {
+        "summary": "Check status of local print job",
+        "tags": ["Jobs"],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "type": "string",
+            "description": "Job ID"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Job status",
+            "schema": {
+              "type": "object",
+              "properties": {
+                "jobId": {"type": "string"},
+                "status": {"type": "string"}
+              }
+            }
+          },
+          "400": {
+            "description": "Job ID required"
+          }
+        }
+      }
+    },
+    "/print": {
+      "post": {
+        "summary": "Submit PDF file to print queue",
+        "description": "Prints a PDF file to the specified printer. Available when mode is standalone or server.enable_local_print_endpoint is true.",
+        "tags": ["Print"],
+        "consumes": ["multipart/form-data"],
+        "parameters": [
+          {
+            "name": "printer",
+            "in": "formData",
+            "type": "string",
+            "required": false,
+            "description": "Target printer name"
+          },
+          {
+            "name": "file",
+            "in": "formData",
+            "type": "file",
+            "required": true,
+            "description": "PDF document to print"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Print job queued successfully",
+            "schema": {
+              "type": "object",
+              "properties": {
+                "success": {"type": "boolean"},
+                "jobId": {"type": "string"}
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid form or missing file"
+          },
+          "403": {
+            "description": "Endpoint disabled in production agent mode"
+          },
+          "500": {
+            "description": "Print error"
+          }
+        }
+      }
+    }
+  }
+}

@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -55,6 +56,13 @@ func findGhostscript(override string) string {
 	return ""
 }
 
+func purgeStuckJobs(ctx context.Context, printerName string) {
+	cleanName := strings.ReplaceAll(printerName, "'", "''")
+	psCmd := fmt.Sprintf("Get-PrintJob -PrinterName '%s' -ErrorAction SilentlyContinue | Where-Object { $_.JobStatus -match 'Error|Deleting' } | Remove-PrintJob -ErrorAction SilentlyContinue", cleanName)
+	cmd := exec.CommandContext(ctx, "powershell", "-NoProfile", "-NonInteractive", "-Command", psCmd)
+	_ = cmd.Run()
+}
+
 func (p *WindowsPrinter) Print(ctx context.Context, job Job) error {
 	gs := p.gsPath
 	if gs == "" {
@@ -65,32 +73,51 @@ func (p *WindowsPrinter) Print(ctx context.Context, job Job) error {
 		return ErrGSNotFound
 	}
 
+	purgeStuckJobs(ctx, job.Printer)
+
 	args := []string{
 		"-dBATCH",
 		"-dNOPAUSE",
 		"-dQUIET",
 		"-sDEVICE=mswinpr2",
-		fmt.Sprintf("-sOutputFile=\\\\spool\\%s", job.Printer),
+		fmt.Sprintf("-sOutputFile=%%printer%%%s", job.Printer),
+		"-dFitPage",
+		"-dPDFFitPage",
+		"-dNoCancel",
 	}
 
+	paper := "a4"
 	if job.Template.Paper != "" {
-		args = append(args, fmt.Sprintf("-sPAPERSIZE=%s", strings.ToLower(job.Template.Paper)))
-	} else {
-		args = append(args, "-dNORANGEPAGESIZE")
+		paper = strings.ToLower(job.Template.Paper)
 	}
+	args = append(args, fmt.Sprintf("-sPAPERSIZE=%s", paper), "-dFIXEDMEDIA")
 
 	if job.Template.Copies > 1 {
 		args = append(args, fmt.Sprintf("-dNumCopies=%d", job.Template.Copies))
 	}
 
-	args = append(args, job.FilePath)
+	args = append(args,
+		"-c",
+		"<< /UserSettings << /MaxResolution 300 >> >> setpagedevice",
+		"-f",
+		job.FilePath,
+	)
+
+	fi, _ := os.Stat(job.FilePath)
+	var fileSize int64
+	if fi != nil {
+		fileSize = fi.Size()
+	}
+	slog.Info("executing windows print job", "printer", job.Printer, "file", job.FilePath, "bytes", fileSize)
 
 	cmd := exec.CommandContext(ctx, gs, args...)
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
+	var output bytes.Buffer
+	cmd.Stdout = &output
+	cmd.Stderr = &output
 
 	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("%w: %s (%v)", ErrPrintFailed, strings.TrimSpace(stderr.String()), err)
+		purgeStuckJobs(context.Background(), job.Printer)
+		return fmt.Errorf("%w: %s (%v)", ErrPrintFailed, strings.TrimSpace(output.String()), err)
 	}
 
 	return nil

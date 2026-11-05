@@ -5,6 +5,7 @@ package tray
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
 	"runtime"
 
@@ -40,8 +41,8 @@ func (t *Tray) Run(ctx context.Context) {
 		} else if len(assets.IconPNG) > 0 {
 			systray.SetIcon(assets.IconPNG)
 		}
-		systray.SetTitle("Print Agent")
-		systray.SetTooltip("Go Print Agent")
+		systray.SetTitle("RSCPrinting")
+		systray.SetTooltip("RSCPrinting")
 
 		mStatus := systray.AddMenuItem(fmt.Sprintf("Status: Running (Port %d)", t.cfg.Server.Port), "Status local server")
 		mStatus.Disable()
@@ -55,6 +56,8 @@ func (t *Tray) Run(ctx context.Context) {
 		systray.AddSeparator()
 
 		mDashboard := systray.AddMenuItem("Buka Dashboard", "Buka browser ke local health")
+		mDocs := systray.AddMenuItem("Dokumentasi API", "Buka Swagger UI di browser (/docs)")
+		mConfig := systray.AddMenuItem("Konfigurasi", "Buka file konfigurasi YAML")
 		mLog := systray.AddMenuItem("Lihat Log", "Buka file log")
 		mCheckUpdate := systray.AddMenuItem("Cek Update", "Picu cek update dari GitHub")
 		mRestart := systray.AddMenuItem("Restart Server", "Restart loop service")
@@ -82,6 +85,20 @@ func (t *Tray) Run(ctx context.Context) {
 				case <-mDashboard.ClickedCh:
 					url := fmt.Sprintf("http://127.0.0.1:%d/health", t.cfg.Server.Port)
 					openBrowser(url)
+				case <-mDocs.ClickedCh:
+					url := fmt.Sprintf("http://127.0.0.1:%d/docs", t.cfg.Server.Port)
+					openBrowser(url)
+				case <-mConfig.ClickedCh:
+					cfgFile := t.cfg.ConfigPath
+					if cfgFile == "" {
+						cfgFile = "configs/config.yaml"
+					}
+					if _, err := os.Stat(cfgFile); err != nil {
+						if _, err2 := os.Stat("config.yaml"); err2 == nil {
+							cfgFile = "config.yaml"
+						}
+					}
+					openFile(cfgFile)
 				case <-mLog.ClickedCh:
 					if t.cfg.Logging.File != "" {
 						openFile(t.cfg.Logging.File)
