@@ -194,3 +194,116 @@ func (p *WindowsPrinter) Info(ctx context.Context, name string) (PrinterInfo, er
 	}
 	return PrinterInfo{}, ErrPrinterNotFound
 }
+
+func (p *WindowsPrinter) Register(ctx context.Context, params RegisterPrinterParams) error {
+	driver := params.DriverName
+	if driver == "" {
+		driver = "Generic / Text Only"
+	}
+
+	cleanName := strings.ReplaceAll(params.Name, "'", "''")
+	cleanDriver := strings.ReplaceAll(driver, "'", "''")
+	cleanPort := strings.ReplaceAll(params.PortOrURI, "'", "''")
+
+	var psScript string
+
+	switch params.Type {
+	case PrinterTypeHTTPShared:
+		psScript = fmt.Sprintf("Add-Printer -ConnectionName '%s'", cleanPort)
+	case PrinterTypeIP:
+		portName := fmt.Sprintf("IP_%s", cleanPort)
+		psScript = fmt.Sprintf(
+			`$port = Get-PrinterPort -Name '%s' -ErrorAction SilentlyContinue; `+
+				`if (-not $port) { Add-PrinterPort -Name '%s' -PrinterHostAddress '%s' -PortNumber 9100 }; `+
+				`Add-Printer -Name '%s' -DriverName '%s' -PortName '%s'`,
+			portName, portName, cleanPort, cleanName, cleanDriver, portName,
+		)
+	case PrinterTypeUSB, PrinterTypeBluetooth:
+		psScript = fmt.Sprintf("Add-Printer -Name '%s' -DriverName '%s' -PortName '%s'", cleanName, cleanDriver, cleanPort)
+	default:
+		return fmt.Errorf("unsupported printer type: %s", params.Type)
+	}
+
+	if params.IsDefault {
+		psScript += fmt.Sprintf(`; (New-Object -ComObject WScript.Network).SetDefaultPrinter('%s')`, cleanName)
+	}
+
+	cmd := exec.CommandContext(ctx, "powershell", "-NoProfile", "-NonInteractive", "-Command", psScript)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("register printer failed: %s (%w)", strings.TrimSpace(string(out)), err)
+	}
+
+	return nil
+}
+
+func (p *WindowsPrinter) Options(ctx context.Context) (PrinterOptions, error) {
+	return PrinterOptions{
+		Types:   SupportedPrinterTypes,
+		Drivers: listWindowsDrivers(ctx),
+		Ports:   listWindowsPorts(ctx),
+	}, nil
+}
+
+func runPowerShellLines(ctx context.Context, script string) []string {
+	cmd := exec.CommandContext(ctx, "powershell", "-NoProfile", "-NonInteractive", "-Command", script)
+	out, err := cmd.Output()
+	if err != nil {
+		return nil
+	}
+	var result []string
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimSpace(strings.TrimSuffix(line, "\r"))
+		if line != "" {
+			result = append(result, line)
+		}
+	}
+	return result
+}
+
+func listWindowsDrivers(ctx context.Context) []string {
+	script := "Get-PrinterDriver -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Name"
+	if drivers := runPowerShellLines(ctx, script); len(drivers) > 0 {
+		return drivers
+	}
+	// Fallback untuk Windows 7: WMI (format Name = "Driver,Version,Environment")
+	wmiScript := "Get-WmiObject Win32_PrinterDriver | ForEach-Object { ($_.Name -split ',')[0] } | Select-Object -Unique"
+	return runPowerShellLines(ctx, wmiScript)
+}
+
+func listWindowsPorts(ctx context.Context) []PrinterPort {
+	script := "Get-PrinterPort -ErrorAction SilentlyContinue | Select-Object Name,Description | ConvertTo-Csv -NoTypeInformation"
+	cmd := exec.CommandContext(ctx, "powershell", "-NoProfile", "-NonInteractive", "-Command", script)
+	out, err := cmd.Output()
+	if err == nil {
+		lines := strings.Split(string(out), "\n")
+		var ports []PrinterPort
+		for _, line := range lines {
+			line = strings.TrimSpace(strings.TrimSuffix(line, "\r"))
+			if line == "" || strings.HasPrefix(line, `"Name"`) {
+				continue
+			}
+			parts := strings.Split(line, ",")
+			if len(parts) >= 1 {
+				name := strings.Trim(parts[0], `" `)
+				desc := ""
+				if len(parts) >= 2 {
+					desc = strings.Trim(parts[1], `" `)
+				}
+				if name != "" {
+					ports = append(ports, PrinterPort{Name: name, Description: desc})
+				}
+			}
+		}
+		if len(ports) > 0 {
+			return ports
+		}
+	}
+
+	// Fallback untuk Windows 7: WMI TCP/IP ports
+	var ports []PrinterPort
+	for _, name := range runPowerShellLines(ctx, "Get-WmiObject Win32_TCPIPPrinterPort | Select-Object -ExpandProperty Name") {
+		ports = append(ports, PrinterPort{Name: name})
+	}
+	return ports
+}

@@ -43,6 +43,8 @@ func New(cfg config.Config, c *wsclient.Client, p printer.Printer, qm *queue.Man
 	mux.HandleFunc("/health", s.handleHealth)
 	mux.HandleFunc("/version", s.handleVersion)
 	mux.HandleFunc("/printers", s.handlePrinters)
+	mux.HandleFunc("/printers/options", s.handlePrinterOptions)
+	mux.HandleFunc("/printers/register", s.handleRegisterPrinter)
 	mux.HandleFunc("/jobs/", s.handleJobs)
 	mux.HandleFunc("/print", s.handlePrint)
 	mux.HandleFunc("/docs", s.handleDocs)
@@ -119,6 +121,61 @@ func (s *Server) handlePrinters(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, list)
+}
+
+func (s *Server) handlePrinterOptions(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	opts, err := s.printer.Options(r.Context())
+	if err != nil {
+		http.Error(w, fmt.Sprintf("failed to get printer options: %v", err), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, opts)
+}
+
+func (s *Server) handleRegisterPrinter(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var params printer.RegisterPrinterParams
+	if err := json.NewDecoder(r.Body).Decode(&params); err != nil {
+		http.Error(w, fmt.Sprintf("invalid request body: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	if params.Name == "" || params.PortOrURI == "" || params.Type == "" {
+		http.Error(w, "name, type, and portOrUri are required", http.StatusBadRequest)
+		return
+	}
+
+	if err := s.printer.Register(r.Context(), params); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]interface{}{
+			"success": false,
+			"error":   err.Error(),
+		})
+		return
+	}
+
+	if s.client != nil {
+		if list, err := s.printer.List(r.Context()); err == nil {
+			var names []string
+			for _, p := range list {
+				names = append(names, p.Name)
+			}
+			_ = s.client.NotifyPrintersUpdate(names)
+		}
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"success": true,
+		"printer": params.Name,
+	})
 }
 
 func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {

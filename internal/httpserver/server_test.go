@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -81,5 +82,22 @@ func TestLocalHTTPServerEndpoints(t *testing.T) {
 	srv.ServeHTTP(rrPrint, reqPrint)
 	if rrPrint.Code != http.StatusForbidden {
 		t.Fatalf("expected 403 Forbidden for disabled /print endpoint, got %d", rrPrint.Code)
+	}
+
+	// Test POST /printers/register
+	regPayload := `{"name":"Kasir-Network","driverName":"Generic / Text Only","type":"IP","portOrUri":"192.168.1.200"}`
+	reqReg := httptest.NewRequest(http.MethodPost, "/printers/register", strings.NewReader(regPayload))
+	rrReg := httptest.NewRecorder()
+	srv.ServeHTTP(rrReg, reqReg)
+	if rrReg.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK for register endpoint, got %d: %s", rrReg.Code, rrReg.Body.String())
+	}
+
+	// Test GET /printers/options
+	reqOpts := httptest.NewRequest(http.MethodGet, "/printers/options", nil)
+	rrOpts := httptest.NewRecorder()
+	srv.ServeHTTP(rrOpts, reqOpts)
+	if rrOpts.Code != http.StatusOK {
+		t.Fatalf("expected 200 OK for printer options endpoint, got %d: %s", rrOpts.Code, rrOpts.Body.String())
 	}
 }

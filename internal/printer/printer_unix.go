@@ -102,3 +102,81 @@ func (p *UnixPrinter) Info(ctx context.Context, name string) (PrinterInfo, error
 	}
 	return PrinterInfo{}, ErrPrinterNotFound
 }
+
+func (p *UnixPrinter) Register(ctx context.Context, params RegisterPrinterParams) error {
+	var uri string
+	switch params.Type {
+	case PrinterTypeHTTPShared:
+		uri = params.PortOrURI
+		if strings.HasPrefix(strings.ToLower(uri), "http://") {
+			uri = "ipp://" + uri[7:]
+		}
+	case PrinterTypeIP:
+		uri = fmt.Sprintf("socket://%s:9100", params.PortOrURI)
+	default:
+		uri = params.PortOrURI
+	}
+
+	args := []string{"-p", params.Name, "-v", uri, "-E"}
+	cmd := exec.CommandContext(ctx, "lpadmin", args...)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("lpadmin failed: %s (%w)", strings.TrimSpace(string(out)), err)
+	}
+
+	if params.IsDefault {
+		defCmd := exec.CommandContext(ctx, "lpadmin", "-d", params.Name)
+		_ = defCmd.Run()
+	}
+	return nil
+}
+
+func (p *UnixPrinter) Options(ctx context.Context) (PrinterOptions, error) {
+	return PrinterOptions{
+		Types:   SupportedPrinterTypes,
+		Drivers: listUnixDrivers(ctx),
+		Ports:   listUnixPorts(ctx),
+	}, nil
+}
+
+func listUnixDrivers(ctx context.Context) []string {
+	out, err := exec.CommandContext(ctx, "lpinfo", "-m").Output()
+	if err != nil {
+		return nil
+	}
+	var drivers []string
+	seen := make(map[string]bool)
+	for _, line := range strings.Split(string(out), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 0 {
+			continue
+		}
+		model := fields[0]
+		if model != "" && !seen[model] {
+			seen[model] = true
+			drivers = append(drivers, model)
+		}
+	}
+	return drivers
+}
+
+func listUnixPorts(ctx context.Context) []PrinterPort {
+	out, err := exec.CommandContext(ctx, "lpinfo", "-v").Output()
+	if err != nil {
+		return nil
+	}
+	var ports []PrinterPort
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		uri := fields[1]
+		desc := strings.Join(fields[2:], " ")
+		ports = append(ports, PrinterPort{Name: uri, Description: desc})
+	}
+	return ports
+}

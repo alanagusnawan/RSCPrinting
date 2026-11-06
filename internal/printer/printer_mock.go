@@ -57,3 +57,22 @@ func (m *MockPrinter) Info(ctx context.Context, name string) (PrinterInfo, error
 	}
 	return PrinterInfo{}, ErrPrinterNotFound
 }
+
+func (m *MockPrinter) Register(ctx context.Context, params RegisterPrinterParams) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.Printers = append(m.Printers, PrinterInfo{
+		Name:      params.Name,
+		IsDefault: params.IsDefault,
+		Status:    "ready",
+	})
+	return nil
+}
+
+func (m *MockPrinter) Options(ctx context.Context) (PrinterOptions, error) {
+	return PrinterOptions{
+		Types:   SupportedPrinterTypes,
+		Drivers: []string{"Generic / Text Only", "Microsoft Print To PDF"},
+		Ports:   []PrinterPort{{Name: "USB001"}, {Name: "IP_192.168.1.200"}},
+	}, nil
+}

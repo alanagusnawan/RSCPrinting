@@ -26,8 +26,77 @@ type Job struct {
 	Template apitypes.PrintTemplate
 }
 
+type PrinterType string
+
+const (
+	PrinterTypeHTTPShared PrinterType = "HTTP_SHARED"
+	PrinterTypeIP         PrinterType = "IP"
+	PrinterTypeUSB        PrinterType = "USB"
+	PrinterTypeBluetooth  PrinterType = "BLUETOOTH"
+)
+
+type RegisterPrinterParams struct {
+	Name       string      `json:"name"`
+	DriverName string      `json:"driverName,omitempty"`
+	Type       PrinterType `json:"type"`
+	PortOrURI  string      `json:"portOrUri"`
+	IsDefault  bool        `json:"isDefault,omitempty"`
+}
+
+type PrinterTypeOption struct {
+	Type        PrinterType `json:"type"`
+	Label       string      `json:"label"`
+	Description string      `json:"description"`
+	NeedDriver  bool        `json:"needDriver"`
+	PortHint    string      `json:"portHint"`
+}
+
+type PrinterPort struct {
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+}
+
+type PrinterOptions struct {
+	Types   []PrinterTypeOption `json:"types"`
+	Drivers []string            `json:"drivers"`
+	Ports   []PrinterPort       `json:"ports"`
+}
+
+var SupportedPrinterTypes = []PrinterTypeOption{
+	{
+		Type:        PrinterTypeHTTPShared,
+		Label:       "Shared Printer (HTTP/IPP)",
+		Description: "Printer jaringan yang dibagikan; dipetakan via URL/guna IPP.",
+		NeedDriver:  false,
+		PortHint:    "http://server:631/printers/NamaPrinter",
+	},
+	{
+		Type:        PrinterTypeIP,
+		Label:       "Network Printer (IP)",
+		Description: "Printer Wi-Fi/LAN dengan IP statis; port TCP 9100 dibuat otomatis.",
+		NeedDriver:  true,
+		PortHint:    "192.168.1.200",
+	},
+	{
+		Type:        PrinterTypeUSB,
+		Label:       "USB Printer",
+		Description: "Printer lokal via USB; pastikan printer tercolok agar port virtual terbentuk.",
+		NeedDriver:  true,
+		PortHint:    "USB001",
+	},
+	{
+		Type:        PrinterTypeBluetooth,
+		Label:       "Bluetooth / Wireless",
+		Description: "Printer Bluetooth; lakukan pairing dulu lalu gunakan COM port virtual.",
+		NeedDriver:  true,
+		PortHint:    "COM3",
+	},
+}
+
 type Printer interface {
 	Print(ctx context.Context, job Job) error
 	List(ctx context.Context) ([]PrinterInfo, error)
 	Info(ctx context.Context, name string) (PrinterInfo, error)
+	Register(ctx context.Context, params RegisterPrinterParams) error
+	Options(ctx context.Context) (PrinterOptions, error)
 }

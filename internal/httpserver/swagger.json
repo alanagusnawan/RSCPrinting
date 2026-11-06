@@ -85,6 +85,113 @@
         }
       }
     },
+    "/printers/options": {
+      "get": {
+        "summary": "List supported printer types, driver names, and ports",
+        "description": "Returns the printer registration options available on this machine: supported connection types (with hints), installed Windows/CUPS driver names, and existing ports/devices.",
+        "tags": ["Printers"],
+        "responses": {
+          "200": {
+            "description": "Printer registration options",
+            "schema": {
+              "type": "object",
+              "properties": {
+                "types": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "type": {"type": "string", "enum": ["HTTP_SHARED", "IP", "USB", "BLUETOOTH"]},
+                      "label": {"type": "string"},
+                      "description": {"type": "string"},
+                      "needDriver": {"type": "boolean"},
+                      "portHint": {"type": "string"}
+                    }
+                  }
+                },
+                "drivers": {
+                  "type": "array",
+                  "items": {"type": "string"},
+                  "example": ["Generic / Text Only", "EPSON L3210 Series"]
+                },
+                "ports": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "name": {"type": "string", "example": "USB001"},
+                      "description": {"type": "string"}
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "405": {
+            "description": "Method not allowed"
+          },
+          "500": {
+            "description": "Failed to enumerate printer options"
+          }
+        }
+      }
+    },
+    "/printers/register": {
+      "post": {
+        "summary": "Register a new printer into the OS",
+        "description": "Adds a new printer to the local operating system so it appears in Windows Settings > Devices > Printers & Scanners (or CUPS on Linux/macOS), then syncs the updated printer list to the WebSocket server.",
+        "tags": ["Printers"],
+        "consumes": ["application/json"],
+        "parameters": [
+          {
+            "name": "body",
+            "in": "body",
+            "required": true,
+            "schema": {
+              "type": "object",
+              "required": ["name", "type", "portOrUri"],
+              "properties": {
+                "name": {"type": "string", "example": "Kasir-Network", "description": "Display name for the new printer"},
+                "driverName": {"type": "string", "example": "Generic / Text Only", "description": "Windows driver name (defaults to 'Generic / Text Only')"},
+                "type": {
+                  "type": "string",
+                  "enum": ["HTTP_SHARED", "IP", "USB", "BLUETOOTH"],
+                  "example": "IP",
+                  "description": "Printer connection type"
+                },
+                "portOrUri": {
+                  "type": "string",
+                  "example": "192.168.1.200",
+                  "description": "IP address (IP), share/connection URL (HTTP_SHARED), virtual port like USB001 (USB), or COM port like COM3 (BLUETOOTH)"
+                },
+                "isDefault": {"type": "boolean", "example": false, "description": "Set as the default printer after registration"}
+              }
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Printer registered successfully",
+            "schema": {
+              "type": "object",
+              "properties": {
+                "success": {"type": "boolean"},
+                "printer": {"type": "string"}
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid request body or missing required fields"
+          },
+          "405": {
+            "description": "Method not allowed"
+          },
+          "500": {
+            "description": "Printer registration failed"
+          }
+        }
+      }
+    },
     "/jobs/{id}": {
       "get": {
         "summary": "Check status of local print job",
