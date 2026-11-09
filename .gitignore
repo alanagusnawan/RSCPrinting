@@ -1,2 +1,5 @@
 goals/
 PROMPT_BACKEND_NODEJS.md
+dist/*.msi
+data/
+logs/

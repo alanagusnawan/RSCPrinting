@@ -5,11 +5,11 @@ import "time"
 type MessageType string
 
 const (
-	TypeHello           MessageType = "hello"
-	TypeWelcome         MessageType = "welcome"
-	TypeJob             MessageType = "job"
-	TypeJobResult       MessageType = "job_result"
-	TypePrintersUpdate  MessageType = "printers_update"
+	TypeHello          MessageType = "hello"
+	TypeWelcome        MessageType = "welcome"
+	TypeJob            MessageType = "job"
+	TypeJobResult      MessageType = "job_result"
+	TypePrintersUpdate MessageType = "printers_update"
 )
 
 type HelloMessage struct {
@@ -45,6 +45,8 @@ type JobMessage struct {
 	FileName    string        `json:"fileName"`
 	FileSize    int64         `json:"fileSize"`
 	PDFEncoding string        `json:"pdfEncoding"` // "binary"
+	Format      string        `json:"format,omitempty"`
+	ContentType string        `json:"contentType,omitempty"`
 }
 
 type JobResultMessage struct {

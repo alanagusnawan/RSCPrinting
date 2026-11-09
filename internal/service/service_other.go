@@ -2,7 +2,7 @@
 
 package service
 
-func installWindowsRegistryAutorun(exe string) error {
+func installWindowsRegistryAutorun(_, _, _ string) error {
 	return nil
 }
 

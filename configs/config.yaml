@@ -1,10 +1,8 @@
 mode: agent # agent | standalone
-
 server:
   host: 127.0.0.1 # 127.0.0.1 untuk production; 0.0.0.0 hanya untuk debugging LAN
   port: 8080
   enable_local_print_endpoint: true # aktifkan hanya untuk standalone / testing
-
 ws_server:
   url: "" # kosong = baca dari ./data/config atau env PRINT_AGENT_WS_URL (default: ws://localhost:5488/agent/ws)
   token: "" # kosong = generate otomatis dan simpan di ./data/config atau env PRINT_AGENT_WS_TOKEN
@@ -12,29 +10,37 @@ ws_server:
   handshakeTimeout: 15s
   pingInterval: 30s
   welcomeTimeout: 10s
-
 agent:
   id: "" # UUID, generate otomatis jika kosong (disimpan di ./data/config)
   displayName: "" # "Kasir Depan" dsb.
-
 printers:
-  defaultName: ""
-  allowlist: []
+  defaultName: "Thermal"
+  allowlist:
+    - Thermal
   pollInterval: 5m # deteksi perubahan daftar printer
-
+  thermal:
+    - name: "Thermal" # queue ESC/POS; dirender ke raster, melewati driver OS
+      widthMm: 80 # 58 | 80
+      dpi: 203
+      cut: true
+      trim: true # pangkas margin/padding putih agar cetak penuh lebar
+      feed: 1 # feed (dot) sebelum cut agar tidak terpotong; 50 dot ≈ 18.75mm
 ghostscript:
   path: "" # kosong = auto-detect (Windows)
-
+office:
+  enabled: true # konversi dokumen Office (docx/xlsx/pptx) via LibreOffice headless
+  path: "" # kosong = auto-detect soffice/soffice.exe
+document:
+  allowRaw: true # izinkan byte mentah (ESC/POS, PCL, ZPL) langsung ke printer
+  convertTimeout: 60s # timeout konversi Office
 logging:
   level: info
   format: json
   file: ""
-
 queue:
   maxSizePerPrinter: 10
   jobTimeout: 60s
   maxConcurrentPerPrinter: 1
-
 updater:
   enabled: true
   owner: "alanagusnawan"
@@ -42,7 +48,15 @@ updater:
   token: "" # token opsional / isi jika private repo
   checkInterval: 6h
   prerelease: false
-
 tray:
   enabled: true
   startMinimized: true
+provision:
+  driverSource: "local" # github | url | local
+  apdDir: "dist" # folder berisi file installer APD (relatif ke root repo)
+  assetPattern: "*APD*.exe"
+  githubRepo: "alanagusnawan/RSCPrinting"
+  githubTag: "drivers" # dipakai bila driverSource=github
+  url: "" # bila driverSource=url (mis. URL Epson)
+  sha256: "" # opsional
+  thermalDriverPattern: "*TM-T82*"

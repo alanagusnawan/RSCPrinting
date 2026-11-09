@@ -16,12 +16,13 @@ type Config struct {
 	Arguments   []string
 }
 
-func GetServiceConfig(args []string) *service.Config {
+func GetServiceConfig(args []string, envVars map[string]string) *service.Config {
 	return &service.Config{
 		Name:        "RSCPrinting",
 		DisplayName: "RSCPrinting",
 		Description: "Client-only WebSocket print agent for local printing",
 		Arguments:   args,
+		EnvVars:     envVars,
 		Option: service.KeyValue{
 			"DelayedAutoStart": false,
 		},
@@ -52,7 +53,7 @@ func StatusService(svc service.Service) (service.Status, error) {
 	return svc.Status()
 }
 
-func InstallUserAutorun() error {
+func InstallUserAutorun(configPath, dataDir string) error {
 	exe, err := os.Executable()
 	if err != nil {
 		return err
@@ -60,7 +61,7 @@ func InstallUserAutorun() error {
 
 	switch runtime.GOOS {
 	case "windows":
-		return installWindowsRegistryAutorun(exe)
+		return installWindowsRegistryAutorun(exe, configPath, dataDir)
 	case "linux":
 		return installLinuxDesktopAutorun(exe)
 	case "darwin":

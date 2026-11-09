@@ -11,15 +11,66 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
+
+	"github.com/rscprinting/print-agent/internal/config"
+	"github.com/rscprinting/print-agent/internal/render"
 )
 
 type WindowsPrinter struct {
-	gsPath string
+	gsPath         string
+	officePath     string
+	convertTimeout time.Duration
+	allowRaw       bool
+	thermal        []config.ThermalPrinterConfig
 }
 
-func New(gsOverride string) (*WindowsPrinter, error) {
-	gs := findGhostscript(gsOverride)
-	return &WindowsPrinter{gsPath: gs}, nil
+func New(cfg config.Config) (*WindowsPrinter, error) {
+	gs := findGhostscript(cfg.Ghostscript.Path)
+
+	office := ""
+	if cfg.Office.Enabled {
+		office = render.FindLibreOffice(cfg.Office.Path)
+	}
+
+	allowRaw := true
+	if cfg.Document.AllowRaw != nil {
+		allowRaw = *cfg.Document.AllowRaw
+	}
+
+	return &WindowsPrinter{
+		gsPath:         gs,
+		officePath:     office,
+		convertTimeout: cfg.Document.ConvertTimeout,
+		allowRaw:       allowRaw,
+		thermal:        cfg.Printers.Thermal,
+	}, nil
+}
+
+func (p *WindowsPrinter) resolveGhostscript() string {
+	if p.gsPath != "" {
+		return p.gsPath
+	}
+	p.gsPath = findGhostscript("")
+	return p.gsPath
+}
+
+// thermalOptions mengembalikan konfigurasi render thermal bila printer terdaftar
+// sebagai thermal di config.
+func (p *WindowsPrinter) thermalOptions(printerName string) (*render.ThermalOptions, bool) {
+	cfg, ok := config.PrintersConfig{Thermal: p.thermal}.ThermalFor(printerName)
+	if !ok {
+		return nil, false
+	}
+	return &render.ThermalOptions{
+		GhostscriptPath: p.resolveGhostscript(),
+		WidthMm:         cfg.ResolvedWidthMm(),
+		DPI:             cfg.ResolvedDPI(),
+		Cut:             cfg.ResolvedCut(),
+		Trim:            cfg.ResolvedTrim(),
+		Feed:            cfg.ResolvedFeed(),
+		Timeout:         p.convertTimeout,
+	}, true
 }
 
 func findGhostscript(override string) string {
@@ -64,6 +115,88 @@ func purgeStuckJobs(ctx context.Context, printerName string) {
 }
 
 func (p *WindowsPrinter) Print(ctx context.Context, job Job) error {
+	thermal, isThermal := p.thermalOptions(job.Printer)
+
+	doc, err := render.Prepare(ctx, render.Input{
+		FilePath:    job.FilePath,
+		Format:      job.Format,
+		ContentType: job.ContentType,
+		FileName:    job.FileName,
+	}, render.Options{
+		OfficePath:     p.officePath,
+		ConvertTimeout: p.convertTimeout,
+		Paper:          job.Template.Paper,
+		Thermal:        thermal,
+	})
+	if err != nil {
+		return err
+	}
+	defer doc.Cleanup()
+
+	slog.Info("prepared print job",
+		"printer", job.Printer,
+		"requestedFormat", string(job.Format),
+		"resolvedFormat", string(doc.Format),
+		"raw", doc.IsRaw(),
+		"thermal", isThermal,
+	)
+
+	purgeStuckJobs(ctx, job.Printer)
+
+	// Deteksi driver class/v4: driver model v4 tidak meneruskan datatype RAW ke
+	// port (job "sukses" tapi kertas kosong), dan jalur driver-nya mengeluarkan
+	// EJL/ESC-P-R yang dicetak sebagai sampah oleh printer ESC/POS.
+	drv, drvErr := p.printerDriverName(ctx, job.Printer)
+	classDriver := drvErr == nil && isClassDriver(drv)
+
+	if doc.IsRaw() {
+		if !p.allowRaw {
+			return fmt.Errorf("%w: raw printing is disabled in config", ErrRawSendFailed)
+		}
+		if classDriver {
+			return fmt.Errorf("%w: printer %q memakai driver class/v4 %q; RAW/ESC-POS tidak diteruskan ke perangkat. Ganti driver queue ke \"Epson APD\" atau \"Generic / Text Only\"",
+				ErrDriverIncompatible, job.Printer, drv)
+		}
+		return p.sendRaw(ctx, job.Printer, doc.Raw)
+	}
+
+	if classDriver {
+		return fmt.Errorf("%w: printer %q memakai driver %q; aktifkan jalur thermal (printers.thermal) untuk printer ESC/POS atau pasang driver Epson APD",
+			ErrDriverIncompatible, job.Printer, drv)
+	}
+
+	return p.printRendered(ctx, job, doc.Path)
+}
+
+func (p *WindowsPrinter) printerDriverName(ctx context.Context, name string) (string, error) {
+	clean := strings.ReplaceAll(name, "'", "''")
+	ps := fmt.Sprintf("(Get-Printer -Name '%s' -ErrorAction SilentlyContinue).DriverName", clean)
+	if out, err := exec.CommandContext(ctx, "powershell", "-NoProfile", "-NonInteractive", "-Command", ps).Output(); err == nil {
+		if s := strings.TrimSpace(string(out)); s != "" {
+			return s, nil
+		}
+	}
+
+	wmic := exec.CommandContext(ctx, "wmic", "printer", "where", fmt.Sprintf("name='%s'", clean), "get", "drivername", "/format:list")
+	if out, werr := wmic.Output(); werr == nil {
+		for _, line := range strings.Split(string(out), "\n") {
+			line = strings.TrimSpace(strings.TrimSuffix(line, "\r"))
+			if len(line) > len("drivername=") && strings.EqualFold(line[:len("drivername=")], "drivername=") {
+				return strings.TrimSpace(line[len("drivername="):]), nil
+			}
+		}
+	}
+	return "", fmt.Errorf("cannot determine driver for %q", name)
+}
+
+func isClassDriver(driver string) bool {
+	d := strings.ToLower(driver)
+	return strings.Contains(d, "class driver") ||
+		strings.Contains(d, "universal") ||
+		strings.Contains(d, "ipp class")
+}
+
+func (p *WindowsPrinter) printRendered(ctx context.Context, job Job, filePath string) error {
 	gs := p.gsPath
 	if gs == "" {
 		gs = findGhostscript("")
@@ -72,8 +205,6 @@ func (p *WindowsPrinter) Print(ctx context.Context, job Job) error {
 	if gs == "" {
 		return ErrGSNotFound
 	}
-
-	purgeStuckJobs(ctx, job.Printer)
 
 	args := []string{
 		"-dBATCH",
@@ -100,15 +231,15 @@ func (p *WindowsPrinter) Print(ctx context.Context, job Job) error {
 		"-c",
 		"<< /UserSettings << /MaxResolution 300 >> >> setpagedevice",
 		"-f",
-		job.FilePath,
+		filePath,
 	)
 
-	fi, _ := os.Stat(job.FilePath)
+	fi, _ := os.Stat(filePath)
 	var fileSize int64
 	if fi != nil {
 		fileSize = fi.Size()
 	}
-	slog.Info("executing windows print job", "printer", job.Printer, "file", job.FilePath, "bytes", fileSize)
+	slog.Info("executing windows print job", "printer", job.Printer, "file", filePath, "bytes", fileSize)
 
 	cmd := exec.CommandContext(ctx, gs, args...)
 	var output bytes.Buffer

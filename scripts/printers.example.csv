@@ -1,0 +1,3 @@
+Name,Model,Port,Default,Thermal
+EPSON TM-T82X Kasir 1,EPSON TM-T82X,USB001,true,false
+Thermal,EPSON TM-T82X,USB002,false,true

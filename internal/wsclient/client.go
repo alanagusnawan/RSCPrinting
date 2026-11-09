@@ -8,7 +8,9 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"time"
 
@@ -382,8 +384,10 @@ func (c *Client) serveLoop(ctx context.Context, conn net.Conn) error {
 func (c *Client) handleJob(meta apitypes.JobMessage, pdfBytes []byte) {
 	start := time.Now()
 
-	// 1. Simpan PDF ke temp file
-	tmp, err := os.CreateTemp("", "print-job-*.pdf")
+	ext := jobFileExt(meta)
+
+	// 1. Simpan payload ke temp file dengan ekstensi sesuai format.
+	tmp, err := os.CreateTemp("", "print-job-*"+ext)
 	if err != nil {
 		c.sendJobResult(apitypes.JobResultMessage{
 			Type:       apitypes.TypeJobResult,
@@ -417,10 +421,13 @@ func (c *Client) handleJob(meta apitypes.JobMessage, pdfBytes []byte) {
 	// 2. Eksekusi print via Queue Manager
 	err = c.queueManager.Execute(context.Background(), meta.Printer, func(execCtx context.Context) error {
 		return c.printer.Print(execCtx, printer.Job{
-			JobID:    meta.JobID,
-			Printer:  meta.Printer,
-			FilePath: tmpName,
-			Template: meta.Template,
+			JobID:       meta.JobID,
+			Printer:     meta.Printer,
+			FilePath:    tmpName,
+			Format:      printer.ParseFormat(meta.Format),
+			ContentType: meta.ContentType,
+			FileName:    meta.FileName,
+			Template:    meta.Template,
 		})
 	})
 
@@ -434,6 +441,20 @@ func (c *Client) handleJob(meta apitypes.JobMessage, pdfBytes []byte) {
 			errCode = "PRINTER_TIMEOUT"
 		} else if errors.Is(err, printer.ErrGSNotFound) {
 			errCode = "GS_NOT_FOUND"
+		} else if errors.Is(err, printer.ErrUnsupportedFormat) {
+			errCode = "UNSUPPORTED_FORMAT"
+		} else if errors.Is(err, printer.ErrOfficeConverterNotFound) {
+			errCode = "OFFICE_CONVERTER_NOT_FOUND"
+		} else if errors.Is(err, printer.ErrOfficeConvertFailed) {
+			errCode = "OFFICE_CONVERT_FAILED"
+		} else if errors.Is(err, printer.ErrRawSendFailed) {
+			errCode = "RAW_SEND_FAILED"
+		} else if errors.Is(err, printer.ErrDriverIncompatible) {
+			errCode = "DRIVER_INCOMPATIBLE"
+		} else if errors.Is(err, printer.ErrThermalRenderFailed) {
+			errCode = "THERMAL_RENDER_FAILED"
+		} else if errors.Is(err, printer.ErrPrepareFailed) {
+			errCode = "PREPARE_FAILED"
 		}
 
 		c.sendJobResult(apitypes.JobResultMessage{
@@ -451,6 +472,26 @@ func (c *Client) handleJob(meta apitypes.JobMessage, pdfBytes []byte) {
 			Success:    true,
 			DurationMs: duration,
 		})
+	}
+}
+
+func jobFileExt(meta apitypes.JobMessage) string {
+	if ext := strings.ToLower(filepath.Ext(meta.FileName)); ext != "" {
+		return ext
+	}
+	switch printer.ParseFormat(meta.Format) {
+	case printer.FormatPDF:
+		return ".pdf"
+	case printer.FormatPS:
+		return ".ps"
+	case printer.FormatText:
+		return ".txt"
+	case printer.FormatZPL:
+		return ".zpl"
+	case printer.FormatOffice:
+		return ".docx"
+	default:
+		return ".bin"
 	}
 }
 

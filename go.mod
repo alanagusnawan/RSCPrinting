@@ -10,6 +10,7 @@ require (
 	github.com/zalando/go-keyring v0.2.3
 	go.etcd.io/bbolt v1.3.7
 	golang.org/x/exp v0.0.0-20230522175609-2e198f4a06a1
+	golang.org/x/image v0.15.0
 	golang.org/x/sys v0.15.0
 	gopkg.in/natefinch/lumberjack.v2 v2.2.1
 	gopkg.in/yaml.v3 v3.0.1

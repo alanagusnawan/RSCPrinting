@@ -7,12 +7,15 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/kardianos/service"
 	"github.com/rscprinting/print-agent/internal/config"
 	"github.com/rscprinting/print-agent/internal/httpserver"
+	"github.com/rscprinting/print-agent/internal/instance"
 	"github.com/rscprinting/print-agent/internal/logger"
 	"github.com/rscprinting/print-agent/internal/printer"
 	"github.com/rscprinting/print-agent/internal/queue"
@@ -43,6 +46,10 @@ func main() {
 		cmdTest(args)
 	case "service":
 		cmdService(args)
+	case "run":
+		cmdRunService(args)
+	case "config":
+		cmdConfig(args)
 	case "update":
 		cmdUpdate(args)
 	case "version":
@@ -69,6 +76,7 @@ Commands:
   printers    Daftar printer lokal
   test        Cetak halaman test ke printer tertentu
   service     Kelola background service (install, uninstall, start, stop, status)
+  config      Kelola konfigurasi (set-printers, get-provision)
   update      Cek atau terapkan update binary dari GitHub
   version     Tampilkan versi dan build info
   status      Tampilkan ringkasan status agent`)
@@ -85,7 +93,7 @@ func cmdPrinters(args []string) {
 	_ = fs.Parse(args)
 
 	cfg, _ := config.Load(*configPath)
-	p, err := printer.New(cfg.Ghostscript.Path)
+	p, err := printer.New(cfg)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error init printer backend: %v\n", err)
 		os.Exit(1)
@@ -111,51 +119,76 @@ func cmdPrinters(args []string) {
 }
 
 func cmdTest(args []string) {
-	if len(args) < 1 {
-		fmt.Println("Usage: print-agent test <printer_name>")
+	fs := flag.NewFlagSet("test", flag.ExitOnError)
+	configPath := fs.String("config", "configs/config.yaml", "Path ke file konfigurasi")
+	filePath := fs.String("file", "", "Path file yang akan dicetak (opsional; default halaman uji)")
+	format := fs.String("format", "", "Format: auto|pdf|ps|image|text|office|raw|zpl (kosong = tetap PDF/PS)")
+	_ = fs.Parse(args)
+
+	if fs.NArg() < 1 {
+		fmt.Println("Usage: print-agent test <printer_name> [--file path] [--format f]")
 		os.Exit(1)
 	}
-	printerName := args[0]
+	printerName := fs.Arg(0)
 
-	cfg, _ := config.Load("")
-	p, err := printer.New(cfg.Ghostscript.Path)
+	cfg, _ := config.Load(*configPath)
+	p, err := printer.New(cfg)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error init printer backend: %v\n", err)
 		os.Exit(1)
 	}
 
-	// Test page content with visible text
-	testContent := "%!PS-Adobe-3.0\n" +
-		"/Helvetica-Bold findfont 24 scalefont setfont\n" +
-		"50 750 moveto\n" +
-		"(RSCPrinting Test Page) show\n" +
-		"/Helvetica findfont 14 scalefont setfont\n" +
-		"50 710 moveto\n" +
-		"(Printer: " + printerName + ") show\n" +
-		"50 680 moveto\n" +
-		"(Status: OK - Print Agent Connected) show\n" +
-		"50 660 moveto\n" +
-		"500 660 lineto\n" +
-		"stroke\n" +
-		"showpage\n"
+	var targetPath string
+	requestedFormat := printer.ParseFormat(*format)
+	cleanup := func() {}
 
-	tmp, err := os.CreateTemp("", "test-print-*.ps")
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "create temp file failed: %v\n", err)
-		os.Exit(1)
+	if *filePath != "" {
+		if _, err := os.Stat(*filePath); err != nil {
+			fmt.Fprintf(os.Stderr, "file not found: %v\n", err)
+			os.Exit(1)
+		}
+		targetPath = *filePath
+	} else {
+		// Halaman uji dalam bentuk PostScript.
+		testContent := "%!PS-Adobe-3.0\n" +
+			"/Helvetica-Bold findfont 24 scalefont setfont\n" +
+			"50 750 moveto\n" +
+			"(RSCPrinting Test Page) show\n" +
+			"/Helvetica findfont 14 scalefont setfont\n" +
+			"50 710 moveto\n" +
+			"(Printer: " + printerName + ") show\n" +
+			"50 680 moveto\n" +
+			"(Status: OK - Print Agent Connected) show\n" +
+			"50 660 moveto\n" +
+			"500 660 lineto\n" +
+			"stroke\n" +
+			"showpage\n"
+
+		tmp, err := os.CreateTemp("", "test-print-*.ps")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "create temp file failed: %v\n", err)
+			os.Exit(1)
+		}
+		_, _ = tmp.WriteString(testContent)
+		_ = tmp.Close()
+		targetPath = tmp.Name()
+		cleanup = func() { _ = os.Remove(tmp.Name()) }
+		if requestedFormat == printer.FormatAuto {
+			requestedFormat = printer.FormatPS
+		}
 	}
-	defer os.Remove(tmp.Name())
-	_, _ = tmp.WriteString(testContent)
-	_ = tmp.Close()
+	defer cleanup()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	fmt.Printf("Printing test page to %s...\n", printerName)
+	fmt.Printf("Printing %s to %s (format=%q)...\n", targetPath, printerName, string(requestedFormat))
 	err = p.Print(ctx, printer.Job{
 		JobID:    "test-page",
 		Printer:  printerName,
-		FilePath: tmp.Name(),
+		FilePath: targetPath,
+		Format:   requestedFormat,
+		FileName: targetPath,
 		Template: apitypes.PrintTemplate{Copies: 1},
 	})
 	if err != nil {
@@ -177,6 +210,107 @@ func cmdStatus(args []string) {
 	fmt.Printf("WS URL:      %s\n", cfg.WSServer.URL)
 	fmt.Printf("Local HTTP:  http://%s:%d\n", cfg.Server.Host, cfg.Server.Port)
 	fmt.Printf("Version:     %s\n", version.Version)
+}
+
+func cmdConfig(args []string) {
+	if len(args) < 1 {
+		fmt.Println("Usage: print-agent config set-printers --config <path> --allowlist <a,b,c> [--default <name>]")
+		os.Exit(1)
+	}
+
+	switch args[0] {
+	case "set-printers":
+		cmdConfigSetPrinters(args[1:])
+	case "get-provision":
+		cmdConfigGetProvision(args[1:])
+	default:
+		fmt.Fprintf(os.Stderr, "unknown config action: %s\n", args[0])
+		os.Exit(1)
+	}
+}
+
+func cmdConfigGetProvision(args []string) {
+	fs := flag.NewFlagSet("config get-provision", flag.ExitOnError)
+	configPath := fs.String("config", "configs/config.yaml", "Path ke file konfigurasi")
+	_ = fs.Parse(args)
+
+	cfg, err := config.Load(*configPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "load config failed: %v\n", err)
+		os.Exit(1)
+	}
+	for _, kv := range cfg.Provision.KeyValues() {
+		fmt.Printf("%s=%s\n", kv[0], kv[1])
+	}
+}
+
+func cmdConfigSetPrinters(args []string) {
+	fs := flag.NewFlagSet("config set-printers", flag.ExitOnError)
+	configPath := fs.String("config", "configs/config.yaml", "Path ke file konfigurasi")
+	allowlist := fs.String("allowlist", "", "Daftar nama printer dipisah koma")
+	allowlistFile := fs.String("allowlist-file", "", "File berisi daftar nama printer (satu per baris)")
+	defaultName := fs.String("default", "", "Nama printer default")
+	thermal := fs.String("thermal", "", "Daftar nama printer thermal ESC/POS dipisah koma")
+	_ = fs.Parse(args)
+
+	names, err := resolveAllowlist(*allowlist, *allowlistFile)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+
+	if err := config.SetPrinters(*configPath, names, *defaultName); err != nil {
+		fmt.Fprintf(os.Stderr, "update config failed: %v\n", err)
+		os.Exit(1)
+	}
+
+	thermalCount := 0
+	if *thermal != "" {
+		thermalNames, terr := resolveAllowlist(*thermal, "")
+		if terr != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", terr)
+			os.Exit(1)
+		}
+		if err := config.EnsureThermalPrinters(*configPath, thermalNames); err != nil {
+			fmt.Fprintf(os.Stderr, "update thermal config failed: %v\n", err)
+			os.Exit(1)
+		}
+		thermalCount = len(thermalNames)
+	}
+
+	fmt.Printf("Updated %s: %d printer(s) in allowlist, default=%q, thermal=%d\n", *configPath, len(names), *defaultName, thermalCount)
+}
+
+func resolveAllowlist(inline, file string) ([]string, error) {
+	if inline == "" && file == "" {
+		return nil, fmt.Errorf("tidak ada allowlist yang diberikan (gunakan --allowlist atau --allowlist-file)")
+	}
+
+	var raw []string
+	if inline != "" {
+		raw = append(raw, strings.Split(inline, ",")...)
+	}
+	if file != "" {
+		data, err := os.ReadFile(file)
+		if err != nil {
+			return nil, fmt.Errorf("read allowlist file failed: %w", err)
+		}
+		for _, line := range strings.Split(string(data), "\n") {
+			raw = append(raw, line)
+		}
+	}
+
+	seen := make(map[string]bool)
+	var names []string
+	for _, n := range raw {
+		n = strings.TrimSpace(n)
+		if n == "" || seen[n] {
+			continue
+		}
+		seen[n] = true
+		names = append(names, n)
+	}
+	return names, nil
 }
 
 func cmdUpdate(args []string) {
@@ -227,23 +361,35 @@ func cmdUpdate(args []string) {
 
 func cmdService(args []string) {
 	if len(args) < 1 {
-		fmt.Println("Usage: print-agent service install|uninstall|start|stop|status [--autorun=service|user]")
+		fmt.Println("Usage: print-agent service install|uninstall|start|stop|status [--autorun=service|user|both] [--config path]")
 		os.Exit(1)
 	}
 
 	action := args[0]
 	fs := flag.NewFlagSet("service", flag.ExitOnError)
 	autorunMode := fs.String("autorun", "service", "Mode autorun: service (system) atau user (user login)")
+	configPath := fs.String("config", "configs/config.yaml", "Path ke file konfigurasi (dipakai service)")
 	_ = fs.Parse(args[1:])
 
 	if *autorunMode == "user" {
 		switch action {
 		case "install":
-			if err := agentsvc.InstallUserAutorun(); err != nil {
+			configAbs, _ := filepath.Abs(*configPath)
+			dataAbs := ""
+			if cfg, lerr := config.Load(configAbs); lerr == nil {
+				dd := cfg.DataDir
+				if dd != "" && !filepath.IsAbs(dd) {
+					if a, aerr := filepath.Abs(dd); aerr == nil {
+						dd = a
+					}
+				}
+				dataAbs = dd
+			}
+			if err := agentsvc.InstallUserAutorun(configAbs, dataAbs); err != nil {
 				fmt.Fprintf(os.Stderr, "install user autorun failed: %v\n", err)
 				os.Exit(1)
 			}
-			fmt.Println("User autorun installed successfully.")
+			fmt.Printf("User autorun (registry) installed successfully (config: %s).\n", configAbs)
 		case "uninstall":
 			if err := agentsvc.UninstallUserAutorun(); err != nil {
 				fmt.Fprintf(os.Stderr, "uninstall user autorun failed: %v\n", err)
@@ -256,8 +402,14 @@ func cmdService(args []string) {
 		return
 	}
 
-	svcConfig := agentsvc.GetServiceConfig([]string{"serve"})
-	program := &serviceProgram{}
+	svcArgs, configAbs, envVars, err := resolveServiceRunArgs(*configPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "resolve service args failed: %v\n", err)
+		os.Exit(1)
+	}
+
+	svcConfig := agentsvc.GetServiceConfig(svcArgs, envVars)
+	program := &serviceProgram{configPath: configAbs}
 	s, err := service.New(program, svcConfig)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "init service failed: %v\n", err)
@@ -310,13 +462,18 @@ func cmdService(args []string) {
 }
 
 type serviceProgram struct {
-	cancel context.CancelFunc
+	cancel     context.CancelFunc
+	configPath string
 }
 
 func (p *serviceProgram) Start(s service.Service) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	p.cancel = cancel
-	go runAgent(ctx, "configs/config.yaml")
+	cp := p.configPath
+	if cp == "" {
+		cp = "configs/config.yaml"
+	}
+	go runAgent(ctx, cp)
 	return nil
 }
 
@@ -327,11 +484,78 @@ func (p *serviceProgram) Stop(s service.Service) error {
 	return nil
 }
 
+// resolveServiceRunArgs menyusun argumen service (dijalankan ulang oleh SCM)
+// dengan path absolut, serta environment agar data dir absolut. Ini penting
+// karena working directory service Windows = C:\Windows\System32.
+func resolveServiceRunArgs(configPath string) (svcArgs []string, configAbs string, envVars map[string]string, err error) {
+	configAbs, err = filepath.Abs(configPath)
+	if err != nil {
+		return nil, "", nil, err
+	}
+
+	dataDir := "./data"
+	if cfg, lerr := config.Load(configAbs); lerr == nil {
+		if cfg.DataDir != "" {
+			dataDir = cfg.DataDir
+		}
+	}
+	if !filepath.IsAbs(dataDir) {
+		dataDir, err = filepath.Abs(dataDir)
+		if err != nil {
+			return nil, "", nil, err
+		}
+	}
+
+	envVars = map[string]string{
+		"PRINT_AGENT_DATA_DIR": dataDir,
+	}
+	svcArgs = []string{"run", "--config", configAbs}
+	return svcArgs, configAbs, envVars, nil
+}
+
+// cmdRunService dijalankan oleh Service Control Manager (SCM). Ia memakai
+// kardianos service.Run agar service melaporkan status ke SCM dengan benar.
+func cmdRunService(args []string) {
+	fs := flag.NewFlagSet("run", flag.ExitOnError)
+	configPath := fs.String("config", "configs/config.yaml", "Path ke file konfigurasi YAML")
+	dataDir := fs.String("data-dir", "", "Override direktori data (absolut)")
+	hidden := fs.Bool("hidden", false, "Sembunyikan jendela konsol")
+	_ = fs.Parse(args)
+
+	if *hidden {
+		hideConsole()
+	}
+	if *dataDir != "" {
+		_ = os.Setenv("PRINT_AGENT_DATA_DIR", *dataDir)
+	}
+
+	program := &serviceProgram{configPath: *configPath}
+	s, err := service.New(program, agentsvc.GetServiceConfig([]string{"run"}, nil))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "init service runtime failed: %v\n", err)
+		os.Exit(1)
+	}
+
+	if err := s.Run(); err != nil {
+		fmt.Fprintf(os.Stderr, "service runtime failed: %v\n", err)
+		os.Exit(1)
+	}
+}
+
 func cmdServe(args []string) {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
 	configPath := fs.String("config", "configs/config.yaml", "Path ke file konfigurasi YAML")
 	mode := fs.String("mode", "", "Mode runtime: agent | standalone")
+	dataDir := fs.String("data-dir", "", "Override direktori data (absolut)")
+	hidden := fs.Bool("hidden", false, "Sembunyikan jendela konsol (untuk autorun)")
 	_ = fs.Parse(args)
+
+	if *hidden {
+		hideConsole()
+	}
+	if *dataDir != "" {
+		_ = os.Setenv("PRINT_AGENT_DATA_DIR", *dataDir)
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -363,6 +587,17 @@ func runAgentWithMode(ctx context.Context, configPath, modeOverride string) {
 	log := logger.Setup(cfg.Logging.Level, cfg.Logging.Format, cfg.Logging.File)
 	log.Info("starting print agent", "version", version.Version, "agentId", cfg.Agent.ID, "mode", cfg.Mode)
 
+	// Single-instance: cegah service + autorun registry menjalankan dua agent.
+	release, already, lockErr := instance.Acquire("RSCPrinting-Agent")
+	if lockErr != nil {
+		log.Warn("single-instance lock tidak tersedia; lanjut tanpa lock", "err", lockErr)
+	} else if already {
+		log.Warn("instance RSCPrinting lain sudah berjalan; keluar dari instance ini")
+		return
+	} else {
+		defer release()
+	}
+
 	// Watchdog check
 	up := updater.New(cfg)
 	up.CheckWatchdogRollback()
@@ -376,7 +611,7 @@ func runAgentWithMode(ctx context.Context, configPath, modeOverride string) {
 	defer store.Close()
 
 	// Printer backend
-	p, err := printer.New(cfg.Ghostscript.Path)
+	p, err := printer.New(cfg)
 	if err != nil {
 		log.Error("failed to init printer backend", "err", err)
 		os.Exit(1)

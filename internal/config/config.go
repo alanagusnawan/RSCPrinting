@@ -20,10 +20,13 @@ type Config struct {
 	Agent       AgentConfig       `yaml:"agent"`
 	Printers    PrintersConfig    `yaml:"printers"`
 	Ghostscript GhostscriptConfig `yaml:"ghostscript"`
+	Office      OfficeConfig      `yaml:"office"`
+	Document    DocumentConfig    `yaml:"document"`
 	Logging     LoggingConfig     `yaml:"logging"`
 	Queue       QueueConfig       `yaml:"queue"`
 	Updater     UpdaterConfig     `yaml:"updater"`
 	Tray        TrayConfig        `yaml:"tray"`
+	Provision   ProvisionConfig   `yaml:"provision"`
 	DataDir     string            `yaml:"dataDir"`
 	ConfigPath  string            `yaml:"-"`
 }
@@ -50,13 +53,85 @@ type AgentConfig struct {
 }
 
 type PrintersConfig struct {
-	DefaultName  string        `yaml:"defaultName"`
-	Allowlist    []string      `yaml:"allowlist"`
-	PollInterval time.Duration `yaml:"pollInterval"`
+	DefaultName  string                 `yaml:"defaultName"`
+	Allowlist    []string               `yaml:"allowlist"`
+	PollInterval time.Duration          `yaml:"pollInterval"`
+	Thermal      []ThermalPrinterConfig `yaml:"thermal"`
+}
+
+// ThermalPrinterConfig mengatur printer ESC/POS yang dicetak dengan jalur raster
+// thermal (render ke bitmap lalu kirim perintah GS v 0), melewati driver OS.
+type ThermalPrinterConfig struct {
+	Name    string `yaml:"name"`    // nama queue, dicocokkan tanpa peduli huruf besar/kecil
+	WidthMm int    `yaml:"widthMm"` // lebar kertas (58 atau 80); kosong = 80
+	DPI     int    `yaml:"dpi"`     // resolusi render; kosong = 203
+	Cut     *bool  `yaml:"cut"`     // auto-cut di akhir; kosong = true
+	Trim    *bool  `yaml:"trim"`    // pangkas margin putih; kosong = true
+	Feed    int    `yaml:"feed"`    // feed (dot) sebelum cut; kosong = 150
+}
+
+// ResolvedWidthMm mengembalikan lebar kertas efektif (default 80mm).
+func (t ThermalPrinterConfig) ResolvedWidthMm() int {
+	if t.WidthMm <= 0 {
+		return 80
+	}
+	return t.WidthMm
+}
+
+// ResolvedDPI mengembalikan DPI render efektif (default 203).
+func (t ThermalPrinterConfig) ResolvedDPI() int {
+	if t.DPI <= 0 {
+		return 203
+	}
+	return t.DPI
+}
+
+// ResolvedCut mengembalikan preferensi auto-cut efektif (default true).
+func (t ThermalPrinterConfig) ResolvedCut() bool {
+	if t.Cut == nil {
+		return true
+	}
+	return *t.Cut
+}
+
+// ResolvedTrim mengembalikan preferensi pangkas margin efektif (default true).
+func (t ThermalPrinterConfig) ResolvedTrim() bool {
+	if t.Trim == nil {
+		return true
+	}
+	return *t.Trim
+}
+
+// ResolvedFeed mengembalikan feed sebelum cut (dot) efektif (default 150).
+func (t ThermalPrinterConfig) ResolvedFeed() int {
+	if t.Feed <= 0 {
+		return 150
+	}
+	return t.Feed
+}
+
+// ThermalFor mencari konfigurasi thermal untuk printer bernama name.
+func (c PrintersConfig) ThermalFor(name string) (ThermalPrinterConfig, bool) {
+	for _, t := range c.Thermal {
+		if strings.EqualFold(strings.TrimSpace(t.Name), strings.TrimSpace(name)) {
+			return t, true
+		}
+	}
+	return ThermalPrinterConfig{}, false
 }
 
 type GhostscriptConfig struct {
 	Path string `yaml:"path"`
+}
+
+type OfficeConfig struct {
+	Enabled bool   `yaml:"enabled"` // aktifkan konversi Office via LibreOffice
+	Path    string `yaml:"path"`    // kosong = auto-detect soffice
+}
+
+type DocumentConfig struct {
+	AllowRaw       *bool         `yaml:"allowRaw"`       // izinkan raw/zpl/escpos (default true)
+	ConvertTimeout time.Duration `yaml:"convertTimeout"` // timeout konversi Office
 }
 
 type LoggingConfig struct {
@@ -83,6 +158,34 @@ type UpdaterConfig struct {
 type TrayConfig struct {
 	Enabled        bool `yaml:"enabled"`
 	StartMinimized bool `yaml:"startMinimized"`
+}
+
+// ProvisionConfig mengatur provisioning driver (dipakai skrip install/deploy).
+// Nilai ini juga dipakai sebagai default CLI; script membaca via `config get-provision`.
+type ProvisionConfig struct {
+	DriverSource         string `yaml:"driverSource"` // github | url | local
+	GithubRepo           string `yaml:"githubRepo"`   // owner/repo
+	GithubTag            string `yaml:"githubTag"`    // tag rilis berisi aset driver
+	AssetPattern         string `yaml:"assetPattern"` // pola nama aset (wildcard)
+	URL                  string `yaml:"url"`          // bila driverSource=url
+	SHA256               string `yaml:"sha256"`       // opsional
+	ApdDir               string `yaml:"apdDir"`       // folder installer lokal (mis. "dist")
+	ThermalDriverPattern string `yaml:"thermalDriverPattern"`
+}
+
+// KeyValues mengembalikan pasangan kunci-nilai stabil untuk dikonsumsi skrip
+// (mis. PowerShell) tanpa perlu parsing YAML.
+func (p ProvisionConfig) KeyValues() [][2]string {
+	return [][2]string{
+		{"driverSource", p.DriverSource},
+		{"githubRepo", p.GithubRepo},
+		{"githubTag", p.GithubTag},
+		{"assetPattern", p.AssetPattern},
+		{"url", p.URL},
+		{"sha256", p.SHA256},
+		{"apdDir", p.ApdDir},
+		{"thermalDriverPattern", p.ThermalDriverPattern},
+	}
 }
 
 func DefaultConfig() Config {
@@ -114,6 +217,14 @@ func DefaultConfig() Config {
 		Ghostscript: GhostscriptConfig{
 			Path: "",
 		},
+		Office: OfficeConfig{
+			Enabled: true,
+			Path:    "",
+		},
+		Document: DocumentConfig{
+			AllowRaw:       boolPtr(true),
+			ConvertTimeout: 60 * time.Second,
+		},
 		Logging: LoggingConfig{
 			Level:  "info",
 			Format: "json",
@@ -135,6 +246,13 @@ func DefaultConfig() Config {
 		Tray: TrayConfig{
 			Enabled:        true,
 			StartMinimized: true,
+		},
+		Provision: ProvisionConfig{
+			DriverSource:         "github",
+			GithubRepo:           "alanagusnawan/RSCPrinting",
+			GithubTag:            "drivers",
+			AssetPattern:         "*APD*TM-T82X*.exe",
+			ThermalDriverPattern: "*TM-T82*",
 		},
 		DataDir: "./data",
 	}
@@ -278,6 +396,8 @@ func generateSecureToken(byteLen int) string {
 	_, _ = rand.Read(b)
 	return hex.EncodeToString(b)
 }
+
+func boolPtr(b bool) *bool { return &b }
 
 func generateUUIDv4() string {
 	var b [16]byte

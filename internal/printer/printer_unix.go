@@ -9,15 +9,74 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"time"
+
+	"github.com/rscprinting/print-agent/internal/config"
+	"github.com/rscprinting/print-agent/internal/render"
 )
 
-type UnixPrinter struct{}
+type UnixPrinter struct {
+	officePath     string
+	convertTimeout time.Duration
+	allowRaw       bool
+}
 
-func New(_ string) (*UnixPrinter, error) {
-	return &UnixPrinter{}, nil
+func New(cfg config.Config) (*UnixPrinter, error) {
+	office := ""
+	if cfg.Office.Enabled {
+		office = render.FindLibreOffice(cfg.Office.Path)
+	}
+
+	allowRaw := true
+	if cfg.Document.AllowRaw != nil {
+		allowRaw = *cfg.Document.AllowRaw
+	}
+
+	return &UnixPrinter{
+		officePath:     office,
+		convertTimeout: cfg.Document.ConvertTimeout,
+		allowRaw:       allowRaw,
+	}, nil
 }
 
 func (p *UnixPrinter) Print(ctx context.Context, job Job) error {
+	doc, err := render.Prepare(ctx, render.Input{
+		FilePath:    job.FilePath,
+		Format:      job.Format,
+		ContentType: job.ContentType,
+		FileName:    job.FileName,
+	}, render.Options{
+		OfficePath:     p.officePath,
+		ConvertTimeout: p.convertTimeout,
+		Paper:          job.Template.Paper,
+	})
+	if err != nil {
+		return err
+	}
+	defer doc.Cleanup()
+
+	if doc.IsRaw() {
+		if !p.allowRaw {
+			return fmt.Errorf("%w: raw printing is disabled in config", ErrRawSendFailed)
+		}
+		return p.printRaw(ctx, job.Printer, doc.Raw)
+	}
+
+	return p.printRendered(ctx, job, doc.Path)
+}
+
+func (p *UnixPrinter) printRaw(ctx context.Context, printerName string, data []byte) error {
+	cmd := exec.CommandContext(ctx, "lp", "-d", printerName, "-o", "raw")
+	cmd.Stdin = bytes.NewReader(data)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("%w: %s (%v)", ErrRawSendFailed, strings.TrimSpace(stderr.String()), err)
+	}
+	return nil
+}
+
+func (p *UnixPrinter) printRendered(ctx context.Context, job Job, filePath string) error {
 	args := []string{"-d", job.Printer}
 
 	if job.Template.Paper != "" {
@@ -36,7 +95,7 @@ func (p *UnixPrinter) Print(ctx context.Context, job Job) error {
 		args = append(args, "-o", "fit-to-page")
 	}
 
-	args = append(args, job.FilePath)
+	args = append(args, filePath)
 
 	cmd := exec.CommandContext(ctx, "lp", args...)
 	var stderr bytes.Buffer

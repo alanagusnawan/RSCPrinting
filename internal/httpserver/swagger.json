@@ -224,8 +224,8 @@
     },
     "/print": {
       "post": {
-        "summary": "Submit PDF file to print queue",
-        "description": "Prints a PDF file to the specified printer. Available when mode is standalone or server.enable_local_print_endpoint is true.",
+        "summary": "Submit a document to the print queue (any supported format)",
+        "description": "Prints an uploaded file to the specified printer. Supported formats: PDF, PostScript/EPS, images (JPG/PNG/BMP/GIF/TIFF/WebP), plain text, Office documents (docx/xlsx/pptx/doc/xls/ppt/odt via LibreOffice, when installed), and raw payloads (ESC/POS, PCL, ZPL). If `format` is omitted the agent auto-detects it from the filename, Content-Type and file content. Available when mode is standalone or server.enable_local_print_endpoint is true.",
         "tags": ["Print"],
         "consumes": ["multipart/form-data"],
         "parameters": [
@@ -237,11 +237,19 @@
             "description": "Target printer name"
           },
           {
+            "name": "format",
+            "in": "formData",
+            "type": "string",
+            "required": false,
+            "enum": ["auto", "pdf", "ps", "image", "text", "office", "raw", "zpl"],
+            "description": "Explicit document format (default: auto-detect)"
+          },
+          {
             "name": "file",
             "in": "formData",
             "type": "file",
             "required": true,
-            "description": "PDF document to print"
+            "description": "Document to print (any supported format)"
           }
         ],
         "responses": {
@@ -262,7 +270,7 @@
             "description": "Endpoint disabled in production agent mode"
           },
           "500": {
-            "description": "Print error"
+            "description": "Print error (e.g. UNSUPPORTED_FORMAT, OFFICE_CONVERTER_NOT_FOUND, RAW_SEND_FAILED)"
           }
         }
       }

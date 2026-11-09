@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -215,14 +216,28 @@ func (s *Server) handlePrint(w http.ResponseWriter, r *http.Request) {
 		targetPrinter = s.cfg.Printers.DefaultName
 	}
 
-	file, _, err := r.FormFile("file")
+	file, header, err := r.FormFile("file")
 	if err != nil {
 		http.Error(w, "missing file in form", http.StatusBadRequest)
 		return
 	}
 	defer file.Close()
 
-	tmp, err := os.CreateTemp("", "local-print-*.pdf")
+	fileName := ""
+	contentType := ""
+	if header != nil {
+		fileName = header.Filename
+		contentType = header.Header.Get("Content-Type")
+	}
+
+	ext := ".bin"
+	if e := filepath.Ext(fileName); e != "" {
+		ext = e
+	}
+
+	requestedFormat := printer.ParseFormat(r.FormValue("format"))
+
+	tmp, err := os.CreateTemp("", "local-print-*"+ext)
 	if err != nil {
 		http.Error(w, "failed to create temp file", http.StatusInternalServerError)
 		return
@@ -235,15 +250,18 @@ func (s *Server) handlePrint(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "failed to write temp file", http.StatusInternalServerError)
 		return
 	}
-	_ = tmp.Close() 
+	_ = tmp.Close()
 
 	jobID := fmt.Sprintf("local-%d", time.Now().UnixNano())
 	printErr := s.queueManager.Execute(r.Context(), targetPrinter, func(execCtx context.Context) error {
 		return s.printer.Print(execCtx, printer.Job{
-			JobID:    jobID,
-			Printer:  targetPrinter,
-			FilePath: tmpName,
-			Template: apitypes.PrintTemplate{Copies: 1},
+			JobID:       jobID,
+			Printer:     targetPrinter,
+			FilePath:    tmpName,
+			Format:      requestedFormat,
+			ContentType: contentType,
+			FileName:    fileName,
+			Template:    apitypes.PrintTemplate{Copies: 1},
 		})
 	})
 

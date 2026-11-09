@@ -21,9 +21,27 @@ printers:
   defaultName: ""
   allowlist: []
   pollInterval: 5m    # deteksi perubahan daftar printer
+  # Printer ESC/POS (thermal struk) dirender ke raster ESC/POS, melewati driver OS
+  # sehingga menghindari output rusak (EJL/ESC/P-R) dari driver class/v4.
+  thermal: []
+  # thermal:
+  #   - name: "Thermal"   # cocokkan persis nama queue di OS
+  #     widthMm: 80        # 58 | 80
+  #     dpi: 203
+  #     cut: true          # auto-cut di akhir
+  #     trim: true         # pangkas margin putih (default true)
+  #     feed: 100          # feed (dot) sebelum cut (default 100 ≈ 18.75mm)
 
 ghostscript:
   path: ""  # kosong = auto-detect (Windows)
+
+office:
+  enabled: true   # konversi dokumen Office (docx/xlsx/pptx) via LibreOffice headless
+  path: ""        # kosong = auto-detect soffice/soffice.exe
+
+document:
+  allowRaw: true  # izinkan pengiriman byte mentah (ESC/POS, PCL, ZPL) langsung ke printer
+  convertTimeout: 60s  # timeout konversi Office
 
 logging:
   level: info
@@ -46,3 +64,15 @@ updater:
 tray:
   enabled: true
   startMinimized: true
+
+# Provisioning driver (dipakai scripts/install.ps1 & deploy-printers.ps1).
+# Nilai ini menjadi default CLI; parameter skrip menimpanya.
+provision:
+  driverSource: "local"           # github | url | local
+  apdDir: "dist"                   # folder installer APD lokal (relatif ke root repo)
+  assetPattern: "*APD*.exe"        # pola nama file installer
+  githubRepo: "alanagusnawan/RSCPrinting"
+  githubTag: "drivers"             # tag rilis berisi aset driver (bila driverSource=github)
+  url: ""                          # bila driverSource=url (mis. URL Epson)
+  sha256: ""                       # opsional, verifikasi unduhan
+  thermalDriverPattern: "*TM-T82*" # pola nama driver APD terpasang

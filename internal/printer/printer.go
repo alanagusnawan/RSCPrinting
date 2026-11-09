@@ -4,14 +4,39 @@ import (
 	"context"
 	"errors"
 
+	"github.com/rscprinting/print-agent/internal/render"
 	"github.com/rscprinting/print-agent/pkg/apitypes"
 )
 
 var (
-	ErrPrinterNotFound = errors.New("printer not found")
-	ErrPrintFailed     = errors.New("print execution failed")
-	ErrGSNotFound      = errors.New("ghostscript binary not found")
+	ErrPrinterNotFound         = errors.New("printer not found")
+	ErrPrintFailed             = errors.New("print execution failed")
+	ErrGSNotFound              = errors.New("ghostscript binary not found")
+	ErrRawSendFailed           = errors.New("raw print send failed")
+	ErrDriverIncompatible      = errors.New("printer driver incompatible")
+	ErrUnsupportedFormat       = render.ErrUnsupportedFormat
+	ErrPrepareFailed           = render.ErrPrepareFailed
+	ErrOfficeConverterNotFound = render.ErrOfficeConverterNotFound
+	ErrOfficeConvertFailed     = render.ErrOfficeConvertFailed
+	ErrThermalRenderFailed     = render.ErrThermalRenderFailed
 )
+
+// Format merepresentasikan cara sebuah dokumen harus diproses sebelum dicetak.
+type Format = render.Format
+
+const (
+	FormatAuto   = render.FormatAuto
+	FormatPDF    = render.FormatPDF
+	FormatPS     = render.FormatPS
+	FormatImage  = render.FormatImage
+	FormatText   = render.FormatText
+	FormatOffice = render.FormatOffice
+	FormatRaw    = render.FormatRaw
+	FormatZPL    = render.FormatZPL
+)
+
+// ParseFormat memetakan string (mis. dari CLI/HTTP) ke Format yang dikenal.
+func ParseFormat(s string) Format { return render.NormalizeFormat(s) }
 
 type PrinterInfo struct {
 	Name      string `json:"name"`
@@ -20,10 +45,13 @@ type PrinterInfo struct {
 }
 
 type Job struct {
-	JobID    string
-	Printer  string
-	FilePath string
-	Template apitypes.PrintTemplate
+	JobID       string
+	Printer     string
+	FilePath    string
+	Format      Format
+	ContentType string
+	FileName    string
+	Template    apitypes.PrintTemplate
 }
 
 type PrinterType string
