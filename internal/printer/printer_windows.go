@@ -462,23 +462,97 @@ func (p *WindowsPrinter) Register(ctx context.Context, params RegisterPrinterPar
 		return fmt.Errorf("register printer failed: %s (%w)", strings.TrimSpace(string(out)), err)
 	}
 
-	p.invalidateEnum()
 	return nil
 }
 
-func (p *WindowsPrinter) Remove(ctx context.Context, name string) error {
-	clean := strings.ReplaceAll(name, "'", "''")
-	ps := fmt.Sprintf("Remove-Printer -Name '%s' -ErrorAction SilentlyContinue", clean)
-	if out, err := exec.CommandContext(ctx, "powershell", "-NoProfile", "-NonInteractive", "-Command", ps).CombinedOutput(); err != nil {
-		// Fallback: printui.dll
-		_ = exec.CommandContext(ctx, "rundll32", "printui.dll,PrintUIEntry", "/dl", "/n", name, "/q").Run()
-		_ = out
-	}
-	p.invalidateEnum()
-	if _, err := p.Info(ctx, name); err == nil {
-		return fmt.Errorf("printer %q masih ada setelah dihapus", name)
+func (p *WindowsPrinter) SetDefault(ctx context.Context, name string) error {
+	cleanName := strings.ReplaceAll(name, "'", "''")
+	psScript := fmt.Sprintf(`(New-Object -ComObject WScript.Network).SetDefaultPrinter('%s')`, cleanName)
+	cmd := exec.CommandContext(ctx, "powershell", "-NoProfile", "-NonInteractive", "-Command", psScript)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("set default printer failed: %s (%w)", strings.TrimSpace(string(out)), err)
 	}
 	return nil
+}
+
+func (p *WindowsPrinter) Delete(ctx context.Context, name string) error {
+	cleanName := strings.ReplaceAll(name, "'", "''")
+	psScript := fmt.Sprintf(`Remove-Printer -Name '%s' -ErrorAction Stop`, cleanName)
+	cmd := exec.CommandContext(ctx, "powershell", "-NoProfile", "-NonInteractive", "-Command", psScript)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		// Fallback wmic
+		wmic := exec.CommandContext(ctx, "wmic", "printer", "where", fmt.Sprintf(`name="%s"`, cleanName), "delete")
+		if wout, werr := wmic.CombinedOutput(); werr != nil {
+			return fmt.Errorf("remove printer failed: %s / %s (%w)", strings.TrimSpace(string(out)), strings.TrimSpace(string(wout)), err)
+		}
+	}
+	return nil
+}
+
+func (p *WindowsPrinter) Options(ctx context.Context) (PrinterOptions, error) {
+	// Jalankan enumerasi driver dan port secara paralel dengan timeout agar responsif
+	type resDrivers struct {
+		drivers []string
+	}
+	type resPorts struct {
+		ports []PrinterPort
+	}
+
+	dCh := make(chan resDrivers, 1)
+	pCh := make(chan resPorts, 1)
+
+	go func() {
+		dCtx, cancel := context.WithTimeout(ctx, 4*time.Second)
+		defer cancel()
+		dCh <- resDrivers{drivers: listWindowsDrivers(dCtx)}
+	}()
+
+	go func() {
+		pCtx, cancel := context.WithTimeout(ctx, 4*time.Second)
+		defer cancel()
+		pCh <- resPorts{ports: listWindowsPorts(pCtx)}
+	}()
+
+	var drivers []string
+	var ports []PrinterPort
+
+	select {
+	case res := <-dCh:
+		drivers = res.drivers
+	case <-time.After(5 * time.Second):
+	}
+
+	select {
+	case res := <-pCh:
+		ports = res.ports
+	case <-time.After(5 * time.Second):
+	}
+
+	// Fallback minimum default jika OS lambat/kosong
+	if len(drivers) == 0 {
+		drivers = []string{
+			"Generic / Text Only",
+			"Microsoft Print to PDF",
+			"EPSON TM-T(203dpi) Receipt6",
+			"EPSON L3210 Series",
+		}
+	}
+	if len(ports) == 0 {
+		ports = []PrinterPort{
+			{Name: "USB001", Description: "Virtual printer port for USB"},
+			{Name: "USB002", Description: "Virtual printer port for USB"},
+			{Name: "COM1:", Description: "Serial Port"},
+			{Name: "COM3:", Description: "Serial Port"},
+		}
+	}
+
+	return PrinterOptions{
+		Types:   SupportedPrinterTypes,
+		Drivers: drivers,
+		Ports:   ports,
+	}, nil
 }
 
 func (p *WindowsPrinter) SetDefault(ctx context.Context, name string) error {

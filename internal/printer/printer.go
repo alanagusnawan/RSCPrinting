@@ -140,4 +140,6 @@ type Printer interface {
 	Remove(ctx context.Context, name string) error
 	SetDefault(ctx context.Context, name string) error
 	Options(ctx context.Context) (PrinterOptions, error)
+	SetDefault(ctx context.Context, name string) error
+	Delete(ctx context.Context, name string) error
 }

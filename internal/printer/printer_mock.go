@@ -126,3 +126,11 @@ func (m *MockPrinter) Options(ctx context.Context) (PrinterOptions, error) {
 		Ports:   []PrinterPort{{Name: "USB001"}, {Name: "IP_192.168.1.200"}},
 	}, nil
 }
+
+func (m *MockPrinter) SetDefault(ctx context.Context, name string) error {
+	return nil
+}
+
+func (m *MockPrinter) Delete(ctx context.Context, name string) error {
+	return nil
+}
