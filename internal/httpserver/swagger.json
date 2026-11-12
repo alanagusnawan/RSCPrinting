@@ -2,8 +2,8 @@
   "swagger": "2.0",
   "info": {
     "title": "RSCPrinting API",
-    "description": "Local HTTP Debug & Print API for RSCPrinting Agent",
-    "version": "1.0.0"
+    "description": "Local HTTP Debug & Print API for RSCPrinting Agent. Endpoint mutasi (POST/PUT/DELETE) aktif saat mode standalone atau server.enable_local_print_endpoint=true.",
+    "version": "2.0.0"
   },
   "basePath": "/",
   "schemes": ["http"],
@@ -27,17 +27,7 @@
                 "version": {"type": "string", "example": "1.0.0"},
                 "mode": {"type": "string", "example": "agent"},
                 "timestamp": {"type": "string", "example": "2026-11-05T05:58:00Z"},
-                "printers": {
-                  "type": "array",
-                  "items": {
-                    "type": "object",
-                    "properties": {
-                      "name": {"type": "string"},
-                      "isDefault": {"type": "boolean"},
-                      "status": {"type": "string"}
-                    }
-                  }
-                }
+                "printers": {"type": "array", "items": {"$ref": "#/definitions/Printer"}}
               }
             }
           }
@@ -68,211 +58,248 @@
         "summary": "List available local OS printers",
         "tags": ["Printers"],
         "responses": {
-          "200": {
-            "description": "List of printers",
-            "schema": {
-              "type": "array",
-              "items": {
-                "type": "object",
-                "properties": {
-                  "name": {"type": "string"},
-                  "isDefault": {"type": "boolean"},
-                  "status": {"type": "string"}
-                }
-              }
-            }
-          }
+          "200": {"description": "List of printers", "schema": {"type": "array", "items": {"$ref": "#/definitions/Printer"}}}
+        }
+      },
+      "post": {
+        "summary": "Create (register) a new printer into the OS",
+        "tags": ["Printers"],
+        "parameters": [
+          {"name": "body", "in": "body", "required": true, "schema": {"$ref": "#/definitions/RegisterPrinter"}}
+        ],
+        "responses": {
+          "201": {
+            "description": "Printer created",
+            "schema": {"type": "object", "properties": {"success": {"type": "boolean"}, "printer": {"type": "string"}}}
+          },
+          "400": {"description": "Invalid body or missing required fields"},
+          "403": {"description": "Mutating endpoints disabled in production agent mode"},
+          "500": {"description": "Registration failed"}
         }
       }
     },
     "/printers/options": {
       "get": {
         "summary": "List supported printer types, driver names, and ports",
-        "description": "Returns the printer registration options available on this machine: supported connection types (with hints), installed Windows/CUPS driver names, and existing ports/devices.",
         "tags": ["Printers"],
         "responses": {
-          "200": {
-            "description": "Printer registration options",
-            "schema": {
-              "type": "object",
-              "properties": {
-                "types": {
-                  "type": "array",
-                  "items": {
-                    "type": "object",
-                    "properties": {
-                      "type": {"type": "string", "enum": ["HTTP_SHARED", "IP", "USB", "BLUETOOTH"]},
-                      "label": {"type": "string"},
-                      "description": {"type": "string"},
-                      "needDriver": {"type": "boolean"},
-                      "portHint": {"type": "string"}
-                    }
-                  }
-                },
-                "drivers": {
-                  "type": "array",
-                  "items": {"type": "string"},
-                  "example": ["Generic / Text Only", "EPSON L3210 Series"]
-                },
-                "ports": {
-                  "type": "array",
-                  "items": {
-                    "type": "object",
-                    "properties": {
-                      "name": {"type": "string", "example": "USB001"},
-                      "description": {"type": "string"}
-                    }
-                  }
-                }
-              }
-            }
-          },
-          "405": {
-            "description": "Method not allowed"
-          },
-          "500": {
-            "description": "Failed to enumerate printer options"
-          }
+          "200": {"description": "Printer registration options", "schema": {"$ref": "#/definitions/PrinterOptions"}},
+          "405": {"description": "Method not allowed"},
+          "500": {"description": "Failed to enumerate printer options"}
         }
       }
     },
-    "/printers/register": {
-      "post": {
-        "summary": "Register a new printer into the OS",
-        "description": "Adds a new printer to the local operating system so it appears in Windows Settings > Devices > Printers & Scanners (or CUPS on Linux/macOS), then syncs the updated printer list to the WebSocket server.",
+    "/printers/{name}": {
+      "get": {
+        "summary": "Get a single printer by name",
         "tags": ["Printers"],
-        "consumes": ["application/json"],
+        "parameters": [{"name": "name", "in": "path", "required": true, "type": "string"}],
+        "responses": {
+          "200": {"description": "Printer", "schema": {"$ref": "#/definitions/Printer"}},
+          "404": {"description": "Printer not found"}
+        }
+      },
+      "put": {
+        "summary": "Update a printer (rename, change driver/port, set default)",
+        "tags": ["Printers"],
         "parameters": [
-          {
-            "name": "body",
-            "in": "body",
-            "required": true,
-            "schema": {
-              "type": "object",
-              "required": ["name", "type", "portOrUri"],
-              "properties": {
-                "name": {"type": "string", "example": "Kasir-Network", "description": "Display name for the new printer"},
-                "driverName": {"type": "string", "example": "Generic / Text Only", "description": "Windows driver name (defaults to 'Generic / Text Only')"},
-                "type": {
-                  "type": "string",
-                  "enum": ["HTTP_SHARED", "IP", "USB", "BLUETOOTH"],
-                  "example": "IP",
-                  "description": "Printer connection type"
-                },
-                "portOrUri": {
-                  "type": "string",
-                  "example": "192.168.1.200",
-                  "description": "IP address (IP), share/connection URL (HTTP_SHARED), virtual port like USB001 (USB), or COM port like COM3 (BLUETOOTH)"
-                },
-                "isDefault": {"type": "boolean", "example": false, "description": "Set as the default printer after registration"}
-              }
-            }
-          }
+          {"name": "name", "in": "path", "required": true, "type": "string"},
+          {"name": "body", "in": "body", "required": true, "schema": {"$ref": "#/definitions/UpdatePrinter"}}
         ],
         "responses": {
           "200": {
-            "description": "Printer registered successfully",
-            "schema": {
-              "type": "object",
-              "properties": {
-                "success": {"type": "boolean"},
-                "printer": {"type": "string"}
-              }
-            }
+            "description": "Printer updated",
+            "schema": {"type": "object", "properties": {"success": {"type": "boolean"}, "printer": {"type": "string"}}}
           },
-          "400": {
-            "description": "Invalid request body or missing required fields"
-          },
-          "405": {
-            "description": "Method not allowed"
-          },
-          "500": {
-            "description": "Printer registration failed"
-          }
+          "400": {"description": "Invalid body or no fields"},
+          "403": {"description": "Mutating endpoints disabled in production agent mode"},
+          "500": {"description": "Update failed"}
         }
+      },
+      "delete": {
+        "summary": "Delete (remove) a printer from the OS",
+        "tags": ["Printers"],
+        "parameters": [{"name": "name", "in": "path", "required": true, "type": "string"}],
+        "responses": {
+          "200": {
+            "description": "Printer removed",
+            "schema": {"type": "object", "properties": {"success": {"type": "boolean"}, "printer": {"type": "string"}}}
+          },
+          "403": {"description": "Mutating endpoints disabled in production agent mode"},
+          "500": {"description": "Delete failed"}
+        }
+      }
+    },
+    "/printers/{name}/default": {
+      "post": {
+        "summary": "Set a printer as the OS default",
+        "tags": ["Printers"],
+        "parameters": [{"name": "name", "in": "path", "required": true, "type": "string"}],
+        "responses": {
+          "200": {
+            "description": "Default set",
+            "schema": {"type": "object", "properties": {"success": {"type": "boolean"}, "default": {"type": "string"}}}
+          },
+          "403": {"description": "Mutating endpoints disabled in production agent mode"},
+          "500": {"description": "Failed to set default"}
+        }
+      }
+    },
+    "/config/printers": {
+      "get": {
+        "summary": "Get printers section of the agent config",
+        "tags": ["Config"],
+        "responses": {"200": {"description": "Printers config", "schema": {"$ref": "#/definitions/PrintersConfig"}}}
+      },
+      "put": {
+        "summary": "Replace printers section of the agent config",
+        "tags": ["Config"],
+        "parameters": [{"name": "body", "in": "body", "required": true, "schema": {"$ref": "#/definitions/PrintersConfig"}}],
+        "responses": {
+          "200": {
+            "description": "Updated",
+            "schema": {"type": "object", "properties": {"success": {"type": "boolean"}, "printers": {"$ref": "#/definitions/PrintersConfig"}}}
+          },
+          "400": {"description": "Invalid body"},
+          "403": {"description": "Mutating endpoints disabled in production agent mode"},
+          "500": {"description": "Failed to write config"}
+        }
+      }
+    },
+    "/jobs": {
+      "get": {
+        "summary": "List recent print jobs (newest first)",
+        "tags": ["Jobs"],
+        "responses": {"200": {"description": "Jobs", "schema": {"type": "array", "items": {"$ref": "#/definitions/Job"}}}}
       }
     },
     "/jobs/{id}": {
       "get": {
-        "summary": "Check status of local print job",
+        "summary": "Get a print job by ID",
         "tags": ["Jobs"],
-        "parameters": [
-          {
-            "name": "id",
-            "in": "path",
-            "required": true,
-            "type": "string",
-            "description": "Job ID"
-          }
-        ],
+        "parameters": [{"name": "id", "in": "path", "required": true, "type": "string"}],
         "responses": {
-          "200": {
-            "description": "Job status",
-            "schema": {
-              "type": "object",
-              "properties": {
-                "jobId": {"type": "string"},
-                "status": {"type": "string"}
-              }
-            }
-          },
-          "400": {
-            "description": "Job ID required"
-          }
+          "200": {"description": "Job", "schema": {"$ref": "#/definitions/Job"}},
+          "404": {"description": "Job not found"}
+        }
+      },
+      "delete": {
+        "summary": "Cancel (if running) and remove a job record",
+        "tags": ["Jobs"],
+        "parameters": [{"name": "id", "in": "path", "required": true, "type": "string"}],
+        "responses": {
+          "200": {"description": "Job removed", "schema": {"type": "object", "properties": {"success": {"type": "boolean"}, "jobId": {"type": "string"}}}},
+          "403": {"description": "Mutating endpoints disabled in production agent mode"},
+          "404": {"description": "Job not found"}
         }
       }
     },
     "/print": {
       "post": {
         "summary": "Submit a document to the print queue (any supported format)",
-        "description": "Prints an uploaded file to the specified printer. Supported formats: PDF, PostScript/EPS, images (JPG/PNG/BMP/GIF/TIFF/WebP), plain text, Office documents (docx/xlsx/pptx/doc/xls/ppt/odt via LibreOffice, when installed), and raw payloads (ESC/POS, PCL, ZPL). If `format` is omitted the agent auto-detects it from the filename, Content-Type and file content. Available when mode is standalone or server.enable_local_print_endpoint is true.",
+        "description": "Prints an uploaded file to the specified printer. Supported formats: PDF, PostScript/EPS, images, plain text, Office (via LibreOffice), and raw payloads (ESC/POS, PCL, ZPL). Available when mode is standalone or server.enable_local_print_endpoint is true.",
         "tags": ["Print"],
         "consumes": ["multipart/form-data"],
         "parameters": [
-          {
-            "name": "printer",
-            "in": "formData",
-            "type": "string",
-            "required": false,
-            "description": "Target printer name"
-          },
-          {
-            "name": "format",
-            "in": "formData",
-            "type": "string",
-            "required": false,
-            "enum": ["auto", "pdf", "ps", "image", "text", "office", "raw", "zpl"],
-            "description": "Explicit document format (default: auto-detect)"
-          },
-          {
-            "name": "file",
-            "in": "formData",
-            "type": "file",
-            "required": true,
-            "description": "Document to print (any supported format)"
-          }
+          {"name": "printer", "in": "formData", "type": "string", "required": false, "description": "Target printer name"},
+          {"name": "format", "in": "formData", "type": "string", "required": false, "enum": ["auto", "pdf", "ps", "image", "text", "office", "raw", "zpl"]},
+          {"name": "file", "in": "formData", "type": "file", "required": true}
         ],
         "responses": {
-          "200": {
-            "description": "Print job queued successfully",
-            "schema": {
-              "type": "object",
-              "properties": {
-                "success": {"type": "boolean"},
-                "jobId": {"type": "string"}
-              }
-            }
-          },
-          "400": {
-            "description": "Invalid form or missing file"
-          },
-          "403": {
-            "description": "Endpoint disabled in production agent mode"
-          },
-          "500": {
-            "description": "Print error (e.g. UNSUPPORTED_FORMAT, OFFICE_CONVERTER_NOT_FOUND, RAW_SEND_FAILED)"
-          }
+          "200": {"description": "Print job queued", "schema": {"type": "object", "properties": {"success": {"type": "boolean"}, "jobId": {"type": "string"}}}},
+          "400": {"description": "Invalid form or missing file"},
+          "403": {"description": "Endpoint disabled in production agent mode"},
+          "500": {"description": "Print error (e.g. UNSUPPORTED_FORMAT, DRIVER_INCOMPATIBLE, RAW_SEND_FAILED)"}
         }
+      }
+    }
+  },
+  "definitions": {
+    "Printer": {
+      "type": "object",
+      "properties": {
+        "name": {"type": "string"},
+        "isDefault": {"type": "boolean"},
+        "status": {"type": "string"}
+      }
+    },
+    "RegisterPrinter": {
+      "type": "object",
+      "required": ["name", "type", "portOrUri"],
+      "properties": {
+        "name": {"type": "string", "example": "Kasir-Network"},
+        "driverName": {"type": "string", "example": "Generic / Text Only"},
+        "type": {"type": "string", "enum": ["HTTP_SHARED", "IP", "USB", "BLUETOOTH"]},
+        "portOrUri": {"type": "string", "example": "192.168.1.200"},
+        "isDefault": {"type": "boolean"}
+      }
+    },
+    "UpdatePrinter": {
+      "type": "object",
+      "properties": {
+        "newName": {"type": "string"},
+        "driverName": {"type": "string"},
+        "type": {"type": "string", "enum": ["HTTP_SHARED", "IP", "USB", "BLUETOOTH"]},
+        "portOrUri": {"type": "string"},
+        "isDefault": {"type": "boolean"}
+      }
+    },
+    "PrinterPort": {
+      "type": "object",
+      "properties": {"name": {"type": "string"}, "description": {"type": "string"}}
+    },
+    "PrinterOptions": {
+      "type": "object",
+      "properties": {
+        "types": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "type": {"type": "string"},
+              "label": {"type": "string"},
+              "description": {"type": "string"},
+              "needDriver": {"type": "boolean"},
+              "portHint": {"type": "string"}
+            }
+          }
+        },
+        "drivers": {"type": "array", "items": {"type": "string"}},
+        "ports": {"type": "array", "items": {"$ref": "#/definitions/PrinterPort"}}
+      }
+    },
+    "ThermalPrinterConfig": {
+      "type": "object",
+      "properties": {
+        "name": {"type": "string"},
+        "widthMm": {"type": "integer", "example": 80},
+        "dpi": {"type": "integer", "example": 203},
+        "cut": {"type": "boolean"},
+        "trim": {"type": "boolean"},
+        "feed": {"type": "integer", "example": 150}
+      }
+    },
+    "PrintersConfig": {
+      "type": "object",
+      "properties": {
+        "defaultName": {"type": "string"},
+        "allowlist": {"type": "array", "items": {"type": "string"}},
+        "pollInterval": {"type": "string", "example": "5m"},
+        "thermal": {"type": "array", "items": {"$ref": "#/definitions/ThermalPrinterConfig"}}
+      }
+    },
+    "Job": {
+      "type": "object",
+      "properties": {
+        "id": {"type": "string"},
+        "printer": {"type": "string"},
+        "source": {"type": "string", "enum": ["ws", "http"]},
+        "status": {"type": "string", "enum": ["queued", "running", "success", "error", "canceled"]},
+        "error": {"type": "string"},
+        "errorCode": {"type": "string"},
+        "createdAt": {"type": "string", "format": "date-time"},
+        "startedAt": {"type": "string", "format": "date-time"},
+        "finishedAt": {"type": "string", "format": "date-time"}
       }
     }
   }

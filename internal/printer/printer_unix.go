@@ -189,6 +189,59 @@ func (p *UnixPrinter) Register(ctx context.Context, params RegisterPrinterParams
 	return nil
 }
 
+func (p *UnixPrinter) Remove(ctx context.Context, name string) error {
+	cmd := exec.CommandContext(ctx, "lpadmin", "-x", name)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("lpadmin -x failed: %s (%w)", strings.TrimSpace(string(out)), err)
+	}
+	return nil
+}
+
+func (p *UnixPrinter) SetDefault(ctx context.Context, name string) error {
+	cmd := exec.CommandContext(ctx, "lpadmin", "-d", name)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("lpadmin -d failed: %s (%w)", strings.TrimSpace(string(out)), err)
+	}
+	return nil
+}
+
+func (p *UnixPrinter) Update(ctx context.Context, name string, params UpdatePrinterParams) error {
+	if params.PortOrURI != "" {
+		uri := params.PortOrURI
+		if params.Type == PrinterTypeIP {
+			uri = fmt.Sprintf("socket://%s:9100", params.PortOrURI)
+		}
+		cmd := exec.CommandContext(ctx, "lpadmin", "-p", name, "-v", uri, "-E")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			return fmt.Errorf("lpadmin -v failed: %s (%w)", strings.TrimSpace(string(out)), err)
+		}
+	}
+
+	if params.NewName != "" {
+		if err := p.Remove(ctx, name); err != nil {
+			return err
+		}
+		regType := params.Type
+		if regType == "" {
+			regType = PrinterTypeHTTPShared
+		}
+		if err := p.Register(ctx, RegisterPrinterParams{
+			Name:       params.NewName,
+			DriverName: params.DriverName,
+			Type:       regType,
+			PortOrURI:  params.PortOrURI,
+		}); err != nil {
+			return err
+		}
+		name = params.NewName
+	}
+
+	if params.IsDefault != nil && *params.IsDefault {
+		return p.SetDefault(ctx, name)
+	}
+	return nil
+}
+
 func (p *UnixPrinter) Options(ctx context.Context) (PrinterOptions, error) {
 	return PrinterOptions{
 		Types:   SupportedPrinterTypes,

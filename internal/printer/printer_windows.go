@@ -5,12 +5,14 @@ package printer
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/rscprinting/print-agent/internal/config"
@@ -23,6 +25,10 @@ type WindowsPrinter struct {
 	convertTimeout time.Duration
 	allowRaw       bool
 	thermal        []config.ThermalPrinterConfig
+
+	enumMu    sync.Mutex
+	enumCache *windowsEnumeration
+	enumAt    time.Time
 }
 
 func New(cfg config.Config) (*WindowsPrinter, error) {
@@ -45,6 +51,148 @@ func New(cfg config.Config) (*WindowsPrinter, error) {
 		allowRaw:       allowRaw,
 		thermal:        cfg.Printers.Thermal,
 	}, nil
+}
+
+// windowsEnumeration menyimpan hasil enumerasi printer Windows (drivers, ports,
+// printers) yang diambil dalam satu proses PowerShell.
+type windowsEnumeration struct {
+	drivers  []string
+	ports    []PrinterPort
+	printers []PrinterInfo
+}
+
+const (
+	// windowsEnumTimeout membatasi lama enumerasi agar agent tetap membalas
+	// permintaan server tepat waktu walau WMI/PowerShell lambat.
+	windowsEnumTimeout = 4 * time.Second
+	// windowsEnumTTL menyegarkan cache enumerasi.
+	windowsEnumTTL = 5 * time.Second
+)
+
+// windowsEnumScript mengumpulkan drivers, ports, dan printers dalam SATU proses
+// PowerShell. Tujuannya menghindari beberapa cold-start PowerShell berurutan
+// (termasuk auto-load modul PrintManagement) yang membuat server timeout.
+// Fallback WMI dijalankan di dalam proses yang sama, bukan proses terpisah.
+const windowsEnumScript = `$ErrorActionPreference='SilentlyContinue'
+Import-Module PrintManagement -ErrorAction SilentlyContinue
+$wmiPrinters = @(Get-WmiObject Win32_Printer)
+$defaultName = ''
+foreach ($wp in $wmiPrinters) { if ($wp.Default) { $defaultName = $wp.Name } }
+$drivers = @()
+$ports = @()
+$names = @()
+try { $drivers = @(Get-PrinterDriver -ErrorAction Stop | Select-Object -ExpandProperty Name) } catch {}
+try { $ports = @(Get-PrinterPort -ErrorAction Stop | Select-Object -ExpandProperty Name) } catch {}
+try { $names = @(Get-Printer -ErrorAction Stop | Select-Object -ExpandProperty Name) } catch {}
+if ($drivers.Count -eq 0) { $drivers = @(Get-WmiObject Win32_PrinterDriver | ForEach-Object { ($_.Name -split ',')[0] } | Select-Object -Unique) }
+if ($ports.Count -eq 0) { $ports = @(Get-WmiObject Win32_TCPIPPrinterPort | Select-Object -ExpandProperty Name) }
+if ($names.Count -eq 0) { $names = @($wmiPrinters | Select-Object -ExpandProperty Name) }
+$printers = @($names | Where-Object { $_ } | ForEach-Object { [pscustomobject]@{ name = $_; default = ($_ -eq $defaultName) } })
+[pscustomobject]@{ drivers = @($drivers); ports = @($ports); printers = @($printers) } | ConvertTo-Json -Depth 5 -Compress`
+
+type enumJSON struct {
+	Drivers  json.RawMessage `json:"drivers"`
+	Ports    json.RawMessage `json:"ports"`
+	Printers json.RawMessage `json:"printers"`
+}
+
+type enumPrinter struct {
+	Name      string `json:"name"`
+	IsDefault bool   `json:"default"`
+}
+
+// decodeStringList menerima array JSON (atau skalar akibat unrolling PowerShell).
+func decodeStringList(raw json.RawMessage) []string {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil
+	}
+	var list []string
+	if err := json.Unmarshal(raw, &list); err == nil {
+		return list
+	}
+	var one string
+	if err := json.Unmarshal(raw, &one); err == nil && one != "" {
+		return []string{one}
+	}
+	return nil
+}
+
+func decodePrinters(raw json.RawMessage) []enumPrinter {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil
+	}
+	var list []enumPrinter
+	if err := json.Unmarshal(raw, &list); err == nil {
+		return list
+	}
+	var one enumPrinter
+	if err := json.Unmarshal(raw, &one); err == nil && one.Name != "" {
+		return []enumPrinter{one}
+	}
+	return nil
+}
+
+// invalidateEnum membuang cache enumerasi setelah perubahan printer.
+func (p *WindowsPrinter) invalidateEnum() {
+	p.enumMu.Lock()
+	p.enumCache = nil
+	p.enumAt = time.Time{}
+	p.enumMu.Unlock()
+}
+
+// enumerateWindows mengembalikan drivers/ports/printers dengan cache TTL pendek.
+// Semua data diambil lewat satu panggilan PowerShell.
+func (p *WindowsPrinter) enumerateWindows(ctx context.Context) (*windowsEnumeration, error) {
+	p.enumMu.Lock()
+	if p.enumCache != nil && time.Since(p.enumAt) < windowsEnumTTL {
+		cached := p.enumCache
+		p.enumMu.Unlock()
+		return cached, nil
+	}
+	p.enumMu.Unlock()
+
+	runCtx, cancel := context.WithTimeout(ctx, windowsEnumTimeout)
+	defer cancel()
+
+	out, err := exec.CommandContext(runCtx, "powershell", "-NoProfile", "-NonInteractive", "-Command", windowsEnumScript).Output()
+	if err != nil {
+		return p.staleEnum(fmt.Errorf("enumerate printers failed: %w", err))
+	}
+
+	var raw enumJSON
+	if uerr := json.Unmarshal(bytes.TrimSpace(out), &raw); uerr != nil {
+		return p.staleEnum(fmt.Errorf("parse printer enumeration failed: %w", uerr))
+	}
+
+	enum := &windowsEnumeration{drivers: decodeStringList(raw.Drivers)}
+	for _, name := range decodeStringList(raw.Ports) {
+		enum.ports = append(enum.ports, PrinterPort{Name: name})
+	}
+	for _, pr := range decodePrinters(raw.Printers) {
+		enum.printers = append(enum.printers, PrinterInfo{
+			Name:      pr.Name,
+			IsDefault: pr.IsDefault,
+			Status:    "ready",
+		})
+	}
+
+	p.enumMu.Lock()
+	p.enumCache = enum
+	p.enumAt = time.Now()
+	p.enumMu.Unlock()
+	return enum, nil
+}
+
+// staleEnum mengembalikan cache lama bila ada agar permintaan server tetap
+// dijawab meski enumerasi terbaru gagal/timeout.
+func (p *WindowsPrinter) staleEnum(err error) (*windowsEnumeration, error) {
+	p.enumMu.Lock()
+	cached := p.enumCache
+	p.enumMu.Unlock()
+	if cached != nil {
+		return cached, nil
+	}
+	return nil, err
 }
 
 func (p *WindowsPrinter) resolveGhostscript() string {
@@ -255,62 +403,11 @@ func (p *WindowsPrinter) printRendered(ctx context.Context, job Job, filePath st
 }
 
 func (p *WindowsPrinter) List(ctx context.Context) ([]PrinterInfo, error) {
-	// Gunakan powershell / wmic untuk Win7 SP1+ tanpa CGO
-	cmd := exec.CommandContext(ctx, "powershell", "-NoProfile", "-NonInteractive", "-Command", "Get-WmiObject Win32_Printer | Select-Object Name, Default | ConvertTo-Csv -NoTypeInformation")
-	out, err := cmd.Output()
-	if err == nil {
-		lines := strings.Split(string(out), "\n")
-		var printers []PrinterInfo
-		for _, line := range lines {
-			line = strings.TrimSpace(line)
-			if line == "" || strings.HasPrefix(line, `"Name"`) {
-				continue
-			}
-			parts := strings.Split(line, ",")
-			if len(parts) >= 2 {
-				name := strings.Trim(parts[0], `" `)
-				isDef := strings.EqualFold(strings.Trim(parts[1], `" `), "True")
-				if name != "" {
-					printers = append(printers, PrinterInfo{
-						Name:      name,
-						IsDefault: isDef,
-						Status:    "ready",
-					})
-				}
-			}
-		}
-		if len(printers) > 0 {
-			return printers, nil
-		}
+	enum, err := p.enumerateWindows(ctx)
+	if err != nil {
+		return nil, err
 	}
-
-	// Fallback wmic untuk Win7
-	wmic := exec.CommandContext(ctx, "wmic", "printer", "get", "name,default", "/format:csv")
-	if wmicOut, werr := wmic.Output(); werr == nil {
-		lines := strings.Split(string(wmicOut), "\n")
-		var printers []PrinterInfo
-		for _, line := range lines {
-			line = strings.TrimSpace(line)
-			if line == "" || strings.HasPrefix(strings.ToLower(line), "node") {
-				continue
-			}
-			parts := strings.Split(line, ",")
-			if len(parts) >= 3 {
-				isDef := strings.EqualFold(strings.TrimSpace(parts[1]), "TRUE")
-				name := strings.TrimSpace(parts[2])
-				if name != "" {
-					printers = append(printers, PrinterInfo{
-						Name:      name,
-						IsDefault: isDef,
-						Status:    "ready",
-					})
-				}
-			}
-		}
-		return printers, nil
-	}
-
-	return nil, fmt.Errorf("unable to enumerate printers: %v", err)
+	return enum.printers, nil
 }
 
 func (p *WindowsPrinter) Info(ctx context.Context, name string) (PrinterInfo, error) {
@@ -365,76 +462,87 @@ func (p *WindowsPrinter) Register(ctx context.Context, params RegisterPrinterPar
 		return fmt.Errorf("register printer failed: %s (%w)", strings.TrimSpace(string(out)), err)
 	}
 
+	p.invalidateEnum()
+	return nil
+}
+
+func (p *WindowsPrinter) Remove(ctx context.Context, name string) error {
+	clean := strings.ReplaceAll(name, "'", "''")
+	ps := fmt.Sprintf("Remove-Printer -Name '%s' -ErrorAction SilentlyContinue", clean)
+	if out, err := exec.CommandContext(ctx, "powershell", "-NoProfile", "-NonInteractive", "-Command", ps).CombinedOutput(); err != nil {
+		// Fallback: printui.dll
+		_ = exec.CommandContext(ctx, "rundll32", "printui.dll,PrintUIEntry", "/dl", "/n", name, "/q").Run()
+		_ = out
+	}
+	p.invalidateEnum()
+	if _, err := p.Info(ctx, name); err == nil {
+		return fmt.Errorf("printer %q masih ada setelah dihapus", name)
+	}
+	return nil
+}
+
+func (p *WindowsPrinter) SetDefault(ctx context.Context, name string) error {
+	clean := strings.ReplaceAll(name, "'", "''")
+	ps := fmt.Sprintf("(New-Object -ComObject WScript.Network).SetDefaultPrinter('%s')", clean)
+	out, err := exec.CommandContext(ctx, "powershell", "-NoProfile", "-NonInteractive", "-Command", ps).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("set default printer failed: %s (%w)", strings.TrimSpace(string(out)), err)
+	}
+	p.invalidateEnum()
+	return nil
+}
+
+func (p *WindowsPrinter) Update(ctx context.Context, name string, params UpdatePrinterParams) error {
+	cleanName := strings.ReplaceAll(name, "'", "''")
+
+	setParts := []string{fmt.Sprintf("Set-Printer -Name '%s'", cleanName)}
+	var preParts []string
+
+	if params.NewName != "" {
+		setParts = append(setParts, fmt.Sprintf("-NewName '%s'", strings.ReplaceAll(params.NewName, "'", "''")))
+	}
+	if params.DriverName != "" {
+		setParts = append(setParts, fmt.Sprintf("-DriverName '%s'", strings.ReplaceAll(params.DriverName, "'", "''")))
+	}
+	if params.PortOrURI != "" {
+		port := params.PortOrURI
+		if params.Type == PrinterTypeIP {
+			cleanPort := strings.ReplaceAll(params.PortOrURI, "'", "''")
+			port = fmt.Sprintf("IP_%s", params.PortOrURI)
+			preParts = append(preParts, fmt.Sprintf(
+				"$port = Get-PrinterPort -Name 'IP_%s' -ErrorAction SilentlyContinue; "+
+					"if (-not $port) { Add-PrinterPort -Name 'IP_%s' -PrinterHostAddress '%s' -PortNumber 9100 }",
+				cleanPort, cleanPort, cleanPort,
+			))
+		}
+		setParts = append(setParts, fmt.Sprintf("-PortName '%s'", strings.ReplaceAll(port, "'", "''")))
+	}
+
+	ps := strings.Join(append(preParts, strings.Join(setParts, " ")), "; ")
+	out, err := exec.CommandContext(ctx, "powershell", "-NoProfile", "-NonInteractive", "-Command", ps).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("update printer failed: %s (%w)", strings.TrimSpace(string(out)), err)
+	}
+
+	if params.IsDefault != nil && *params.IsDefault {
+		target := name
+		if params.NewName != "" {
+			target = params.NewName
+		}
+		return p.SetDefault(ctx, target)
+	}
+	p.invalidateEnum()
 	return nil
 }
 
 func (p *WindowsPrinter) Options(ctx context.Context) (PrinterOptions, error) {
+	enum, err := p.enumerateWindows(ctx)
+	if err != nil {
+		return PrinterOptions{Types: SupportedPrinterTypes}, err
+	}
 	return PrinterOptions{
 		Types:   SupportedPrinterTypes,
-		Drivers: listWindowsDrivers(ctx),
-		Ports:   listWindowsPorts(ctx),
+		Drivers: enum.drivers,
+		Ports:   enum.ports,
 	}, nil
-}
-
-func runPowerShellLines(ctx context.Context, script string) []string {
-	cmd := exec.CommandContext(ctx, "powershell", "-NoProfile", "-NonInteractive", "-Command", script)
-	out, err := cmd.Output()
-	if err != nil {
-		return nil
-	}
-	var result []string
-	for _, line := range strings.Split(string(out), "\n") {
-		line = strings.TrimSpace(strings.TrimSuffix(line, "\r"))
-		if line != "" {
-			result = append(result, line)
-		}
-	}
-	return result
-}
-
-func listWindowsDrivers(ctx context.Context) []string {
-	script := "Get-PrinterDriver -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Name"
-	if drivers := runPowerShellLines(ctx, script); len(drivers) > 0 {
-		return drivers
-	}
-	// Fallback untuk Windows 7: WMI (format Name = "Driver,Version,Environment")
-	wmiScript := "Get-WmiObject Win32_PrinterDriver | ForEach-Object { ($_.Name -split ',')[0] } | Select-Object -Unique"
-	return runPowerShellLines(ctx, wmiScript)
-}
-
-func listWindowsPorts(ctx context.Context) []PrinterPort {
-	script := "Get-PrinterPort -ErrorAction SilentlyContinue | Select-Object Name,Description | ConvertTo-Csv -NoTypeInformation"
-	cmd := exec.CommandContext(ctx, "powershell", "-NoProfile", "-NonInteractive", "-Command", script)
-	out, err := cmd.Output()
-	if err == nil {
-		lines := strings.Split(string(out), "\n")
-		var ports []PrinterPort
-		for _, line := range lines {
-			line = strings.TrimSpace(strings.TrimSuffix(line, "\r"))
-			if line == "" || strings.HasPrefix(line, `"Name"`) {
-				continue
-			}
-			parts := strings.Split(line, ",")
-			if len(parts) >= 1 {
-				name := strings.Trim(parts[0], `" `)
-				desc := ""
-				if len(parts) >= 2 {
-					desc = strings.Trim(parts[1], `" `)
-				}
-				if name != "" {
-					ports = append(ports, PrinterPort{Name: name, Description: desc})
-				}
-			}
-		}
-		if len(ports) > 0 {
-			return ports
-		}
-	}
-
-	// Fallback untuk Windows 7: WMI TCP/IP ports
-	var ports []PrinterPort
-	for _, name := range runPowerShellLines(ctx, "Get-WmiObject Win32_TCPIPPrinterPort | Select-Object -ExpandProperty Name") {
-		ports = append(ports, PrinterPort{Name: name})
-	}
-	return ports
 }

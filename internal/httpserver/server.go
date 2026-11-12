@@ -7,12 +7,14 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/rscprinting/print-agent/internal/config"
+	"github.com/rscprinting/print-agent/internal/jobs"
 	"github.com/rscprinting/print-agent/internal/printer"
 	"github.com/rscprinting/print-agent/internal/queue"
 	"github.com/rscprinting/print-agent/internal/version"
@@ -29,24 +31,27 @@ type Server struct {
 	client       *wsclient.Client
 	printer      printer.Printer
 	queueManager *queue.Manager
+	jobs         *jobs.Registry
 	httpServer   *http.Server
 }
 
-func New(cfg config.Config, c *wsclient.Client, p printer.Printer, qm *queue.Manager) *Server {
+func New(cfg config.Config, c *wsclient.Client, p printer.Printer, qm *queue.Manager, jobReg *jobs.Registry) *Server {
 	s := &Server{
 		cfg:          cfg,
 		client:       c,
 		printer:      p,
 		queueManager: qm,
+		jobs:         jobReg,
 	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", s.handleHealth)
 	mux.HandleFunc("/version", s.handleVersion)
 	mux.HandleFunc("/printers", s.handlePrinters)
-	mux.HandleFunc("/printers/options", s.handlePrinterOptions)
-	mux.HandleFunc("/printers/register", s.handleRegisterPrinter)
-	mux.HandleFunc("/jobs/", s.handleJobs)
+	mux.HandleFunc("/printers/", s.handlePrintersSubtree)
+	mux.HandleFunc("/jobs", s.handleJobs)
+	mux.HandleFunc("/jobs/", s.handleJobsSubtree)
+	mux.HandleFunc("/config/printers", s.handleConfigPrinters)
 	mux.HandleFunc("/print", s.handlePrint)
 	mux.HandleFunc("/docs", s.handleDocs)
 	mux.HandleFunc("/docs/", s.handleDocs)
@@ -79,6 +84,33 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	return s.httpServer.Shutdown(ctx)
 }
 
+// allowMutations memberi izin endpoint mutasi (POST/PUT/DELETE) hanya saat
+// mode standalone atau server.enable_local_print_endpoint=true.
+func (s *Server) allowMutations(w http.ResponseWriter) bool {
+	if s.cfg.Server.EnableLocalPrintEndpoint || strings.EqualFold(s.cfg.Mode, "standalone") {
+		return true
+	}
+	http.Error(w, "mutating endpoints are disabled in production agent mode", http.StatusForbidden)
+	return false
+}
+
+func (s *Server) notifyPrintersUpdate(ctx context.Context) {
+	if s.client == nil {
+		return
+	}
+	if list, err := s.printer.List(ctx); err == nil {
+		names := make([]string, 0, len(list))
+		for _, p := range list {
+			names = append(names, p.Name)
+		}
+		_ = s.client.NotifyPrintersUpdate(names)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// System
+// ---------------------------------------------------------------------------
+
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -110,18 +142,46 @@ func (s *Server) handleVersion(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, version.Get())
 }
 
-func (s *Server) handlePrinters(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
+// ---------------------------------------------------------------------------
+// Printers (CRUD)
+// ---------------------------------------------------------------------------
 
-	list, err := s.printer.List(r.Context())
-	if err != nil {
-		http.Error(w, fmt.Sprintf("failed to get printers: %v", err), http.StatusInternalServerError)
+func (s *Server) handlePrinters(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		list, err := s.printer.List(r.Context())
+		if err != nil {
+			http.Error(w, fmt.Sprintf("failed to get printers: %v", err), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, http.StatusOK, list)
+	case http.MethodPost:
+		if !s.allowMutations(w) {
+			return
+		}
+		s.createPrinter(w, r)
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (s *Server) handlePrintersSubtree(w http.ResponseWriter, r *http.Request) {
+	rest := strings.Trim(strings.TrimPrefix(r.URL.Path, "/printers/"), "/")
+	if rest == "" {
+		s.handlePrinters(w, r)
 		return
 	}
-	writeJSON(w, http.StatusOK, list)
+	if rest == "options" {
+		s.handlePrinterOptions(w, r)
+		return
+	}
+	if strings.HasSuffix(rest, "/default") {
+		name, _ := url.PathUnescape(strings.Trim(strings.TrimSuffix(rest, "/default"), "/"))
+		s.handleSetDefaultPrinter(w, r, name)
+		return
+	}
+	name, _ := url.PathUnescape(rest)
+	s.handlePrinterItem(w, r, name)
 }
 
 func (s *Server) handlePrinterOptions(w http.ResponseWriter, r *http.Request) {
@@ -138,59 +198,187 @@ func (s *Server) handlePrinterOptions(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, opts)
 }
 
-func (s *Server) handleRegisterPrinter(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
+func (s *Server) createPrinter(w http.ResponseWriter, r *http.Request) {
 	var params printer.RegisterPrinterParams
 	if err := json.NewDecoder(r.Body).Decode(&params); err != nil {
 		http.Error(w, fmt.Sprintf("invalid request body: %v", err), http.StatusBadRequest)
 		return
 	}
-
 	if params.Name == "" || params.PortOrURI == "" || params.Type == "" {
 		http.Error(w, "name, type, and portOrUri are required", http.StatusBadRequest)
 		return
 	}
 
 	if err := s.printer.Register(r.Context(), params); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]interface{}{
-			"success": false,
-			"error":   err.Error(),
-		})
+		writeJSON(w, http.StatusInternalServerError, map[string]interface{}{"success": false, "error": err.Error()})
 		return
 	}
 
-	if s.client != nil {
-		if list, err := s.printer.List(r.Context()); err == nil {
-			var names []string
-			for _, p := range list {
-				names = append(names, p.Name)
-			}
-			_ = s.client.NotifyPrintersUpdate(names)
-		}
-	}
-
-	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"success": true,
-		"printer": params.Name,
-	})
+	s.notifyPrintersUpdate(r.Context())
+	writeJSON(w, http.StatusCreated, map[string]interface{}{"success": true, "printer": params.Name})
 }
 
+func (s *Server) handlePrinterItem(w http.ResponseWriter, r *http.Request, name string) {
+	if name == "" {
+		http.Error(w, "printer name required", http.StatusBadRequest)
+		return
+	}
+
+	switch r.Method {
+	case http.MethodGet:
+		info, err := s.printer.Info(r.Context(), name)
+		if err != nil {
+			writeJSON(w, http.StatusNotFound, map[string]interface{}{"error": "printer not found", "printer": name})
+			return
+		}
+		writeJSON(w, http.StatusOK, info)
+	case http.MethodPut, http.MethodPatch:
+		if !s.allowMutations(w) {
+			return
+		}
+		s.updatePrinter(w, r, name)
+	case http.MethodDelete:
+		if !s.allowMutations(w) {
+			return
+		}
+		if err := s.printer.Remove(r.Context(), name); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]interface{}{"success": false, "error": err.Error()})
+			return
+		}
+		s.notifyPrintersUpdate(r.Context())
+		writeJSON(w, http.StatusOK, map[string]interface{}{"success": true, "printer": name})
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (s *Server) updatePrinter(w http.ResponseWriter, r *http.Request, name string) {
+	var params printer.UpdatePrinterParams
+	if err := json.NewDecoder(r.Body).Decode(&params); err != nil {
+		http.Error(w, fmt.Sprintf("invalid request body: %v", err), http.StatusBadRequest)
+		return
+	}
+	if params.NewName == "" && params.DriverName == "" && params.PortOrURI == "" && params.IsDefault == nil {
+		http.Error(w, "no fields to update", http.StatusBadRequest)
+		return
+	}
+
+	if err := s.printer.Update(r.Context(), name, params); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]interface{}{"success": false, "error": err.Error()})
+		return
+	}
+
+	s.notifyPrintersUpdate(r.Context())
+	target := name
+	if params.NewName != "" {
+		target = params.NewName
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{"success": true, "printer": target})
+}
+
+func (s *Server) handleSetDefaultPrinter(w http.ResponseWriter, r *http.Request, name string) {
+	if r.Method != http.MethodPost && r.Method != http.MethodPut {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !s.allowMutations(w) {
+		return
+	}
+	if name == "" {
+		http.Error(w, "printer name required", http.StatusBadRequest)
+		return
+	}
+	if err := s.printer.SetDefault(r.Context(), name); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]interface{}{"success": false, "error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{"success": true, "default": name})
+}
+
+// ---------------------------------------------------------------------------
+// Config
+// ---------------------------------------------------------------------------
+
+func (s *Server) handleConfigPrinters(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		writeJSON(w, http.StatusOK, s.cfg.Printers)
+	case http.MethodPut:
+		if !s.allowMutations(w) {
+			return
+		}
+		var body config.PrintersConfig
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, fmt.Sprintf("invalid request body: %v", err), http.StatusBadRequest)
+			return
+		}
+		if s.cfg.ConfigPath == "" {
+			http.Error(w, "config path not set", http.StatusInternalServerError)
+			return
+		}
+		if err := config.SetPrintersConfig(s.cfg.ConfigPath, body); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]interface{}{"success": false, "error": err.Error()})
+			return
+		}
+		s.cfg.Printers = body
+		writeJSON(w, http.StatusOK, map[string]interface{}{"success": true, "printers": body})
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Jobs
+// ---------------------------------------------------------------------------
+
 func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {
-	// Status stub untuk endpoint /jobs/{id}
-	jobID := strings.TrimPrefix(r.URL.Path, "/jobs/")
-	if jobID == "" {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.jobs == nil {
+		writeJSON(w, http.StatusOK, []jobs.Job{})
+		return
+	}
+	writeJSON(w, http.StatusOK, s.jobs.List())
+}
+
+func (s *Server) handleJobsSubtree(w http.ResponseWriter, r *http.Request) {
+	id := strings.Trim(strings.TrimPrefix(r.URL.Path, "/jobs/"), "/")
+	if id == "" {
 		http.Error(w, "job id required", http.StatusBadRequest)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"jobId":  jobID,
-		"status": "processed",
-	})
+	if s.jobs == nil {
+		writeJSON(w, http.StatusNotFound, map[string]interface{}{"error": "job not found", "jobId": id})
+		return
+	}
+
+	switch r.Method {
+	case http.MethodGet:
+		j, ok := s.jobs.Get(id)
+		if !ok {
+			writeJSON(w, http.StatusNotFound, map[string]interface{}{"error": "job not found", "jobId": id})
+			return
+		}
+		writeJSON(w, http.StatusOK, j)
+	case http.MethodDelete:
+		if !s.allowMutations(w) {
+			return
+		}
+		if !s.jobs.Delete(id) {
+			writeJSON(w, http.StatusNotFound, map[string]interface{}{"error": "job not found", "jobId": id})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]interface{}{"success": true, "jobId": id})
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
 }
+
+// ---------------------------------------------------------------------------
+// Print
+// ---------------------------------------------------------------------------
 
 func (s *Server) handlePrint(w http.ResponseWriter, r *http.Request) {
 	// Diizinkan hanya jika mode=standalone atau server.enable_local_print_endpoint: true
@@ -253,7 +441,17 @@ func (s *Server) handlePrint(w http.ResponseWriter, r *http.Request) {
 	_ = tmp.Close()
 
 	jobID := fmt.Sprintf("local-%d", time.Now().UnixNano())
-	printErr := s.queueManager.Execute(r.Context(), targetPrinter, func(execCtx context.Context) error {
+	jobCtx, cancelJob := context.WithCancel(r.Context())
+	defer cancelJob()
+	if s.jobs != nil {
+		s.jobs.Create(jobID, targetPrinter, "http")
+		s.jobs.SetCancel(jobID, cancelJob)
+	}
+
+	printErr := s.queueManager.Execute(jobCtx, targetPrinter, func(execCtx context.Context) error {
+		if s.jobs != nil {
+			s.jobs.Start(jobID)
+		}
 		return s.printer.Print(execCtx, printer.Job{
 			JobID:       jobID,
 			Printer:     targetPrinter,
@@ -266,18 +464,29 @@ func (s *Server) handlePrint(w http.ResponseWriter, r *http.Request) {
 	})
 
 	if printErr != nil {
+		if s.jobs != nil {
+			s.jobs.Finish(jobID, printErr, "PRINT_FAILED")
+		}
 		writeJSON(w, http.StatusInternalServerError, map[string]interface{}{
 			"success": false,
+			"jobId":   jobID,
 			"error":   printErr.Error(),
 		})
 		return
 	}
 
+	if s.jobs != nil {
+		s.jobs.Finish(jobID, nil, "")
+	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"success": true,
 		"jobId":   jobID,
 	})
 }
+
+// ---------------------------------------------------------------------------
+// Misc
+// ---------------------------------------------------------------------------
 
 func writeJSON(w http.ResponseWriter, code int, val interface{}) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")

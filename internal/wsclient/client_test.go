@@ -21,11 +21,11 @@ import (
 
 func TestWSClientHandshakeAndTwoFrameJob(t *testing.T) {
 	var (
-		serverReceivedHello   bool
-		serverReceivedResult  apitypes.JobResultMessage
-		receivedResultSignal  = make(chan struct{})
-		mockPDF               = []byte("%PDF-1.4 TEST PDF STREAM")
-		testJobID             = "job-test-777"
+		serverReceivedHello  bool
+		serverReceivedResult apitypes.JobResultMessage
+		receivedResultSignal = make(chan struct{})
+		mockPDF              = []byte("%PDF-1.4 TEST PDF STREAM")
+		testJobID            = "job-test-777"
 	)
 
 	// Mock server
@@ -125,7 +125,7 @@ func TestWSClientHandshakeAndTwoFrameJob(t *testing.T) {
 	mockP := printer.NewMockPrinter(nil)
 	qm := queue.NewManager(1, 10, 5*time.Second)
 
-	client := wsclient.New(cfg, mockP, qm, store)
+	client := wsclient.New(cfg, mockP, qm, store, nil)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -181,7 +181,7 @@ func TestWSClientFatalAuth(t *testing.T) {
 	mockP := printer.NewMockPrinter(nil)
 	qm := queue.NewManager(1, 10, 5*time.Second)
 
-	client := wsclient.New(cfg, mockP, qm, store)
+	client := wsclient.New(cfg, mockP, qm, store, nil)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()

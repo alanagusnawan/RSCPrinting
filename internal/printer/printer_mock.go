@@ -69,6 +69,56 @@ func (m *MockPrinter) Register(ctx context.Context, params RegisterPrinterParams
 	return nil
 }
 
+func (m *MockPrinter) Update(ctx context.Context, name string, params UpdatePrinterParams) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	found := false
+	for i := range m.Printers {
+		if m.Printers[i].Name != name {
+			continue
+		}
+		found = true
+		if params.NewName != "" {
+			m.Printers[i].Name = params.NewName
+		}
+		if params.IsDefault != nil {
+			m.Printers[i].IsDefault = *params.IsDefault
+		}
+	}
+	if !found {
+		return ErrPrinterNotFound
+	}
+	return nil
+}
+
+func (m *MockPrinter) Remove(ctx context.Context, name string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for i := range m.Printers {
+		if m.Printers[i].Name == name {
+			m.Printers = append(m.Printers[:i], m.Printers[i+1:]...)
+			return nil
+		}
+	}
+	return ErrPrinterNotFound
+}
+
+func (m *MockPrinter) SetDefault(ctx context.Context, name string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	found := false
+	for i := range m.Printers {
+		if m.Printers[i].Name == name {
+			found = true
+		}
+		m.Printers[i].IsDefault = (m.Printers[i].Name == name)
+	}
+	if !found {
+		return ErrPrinterNotFound
+	}
+	return nil
+}
+
 func (m *MockPrinter) Options(ctx context.Context) (PrinterOptions, error) {
 	return PrinterOptions{
 		Types:   SupportedPrinterTypes,

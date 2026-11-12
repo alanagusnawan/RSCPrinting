@@ -2,6 +2,7 @@ package storage
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"sync"
@@ -13,6 +14,10 @@ import (
 
 var bucketPendingResults = []byte("pending_results")
 
+// ErrLocked menandakan DB sedang dipakai instance agent lain (file lock bbolt
+// tidak bisa diambil dalam batas waktu).
+var ErrLocked = errors.New("storage locked by another instance")
+
 type Store struct {
 	db *bolt.DB
 	mu sync.Mutex
@@ -20,8 +25,11 @@ type Store struct {
 
 func Open(dataDir string) (*Store, error) {
 	dbPath := filepath.Join(dataDir, "print-agent.db")
-	db, err := bolt.Open(dbPath, 0600, &bolt.Options{Timeout: 3 * time.Second})
+	db, err := bolt.Open(dbPath, 0600, &bolt.Options{Timeout: 1 * time.Second})
 	if err != nil {
+		if errors.Is(err, bolt.ErrTimeout) {
+			return nil, fmt.Errorf("%w: %v", ErrLocked, err)
+		}
 		return nil, fmt.Errorf("open boltdb failed: %w", err)
 	}
 

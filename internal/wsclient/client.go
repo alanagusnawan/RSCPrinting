@@ -17,6 +17,7 @@ import (
 	"github.com/gobwas/ws"
 	"github.com/gobwas/ws/wsutil"
 	"github.com/rscprinting/print-agent/internal/config"
+	"github.com/rscprinting/print-agent/internal/jobs"
 	"github.com/rscprinting/print-agent/internal/printer"
 	"github.com/rscprinting/print-agent/internal/queue"
 	"github.com/rscprinting/print-agent/internal/storage"
@@ -39,11 +40,16 @@ const (
 	StatusAuthFailed   Status = "Auth Failed"
 )
 
+// controlTimeout membatasi lama pemrosesan pesan kontrol (get_options,
+// get_printers) agar agent selalu membalas sebelum server timeout.
+const controlTimeout = 5 * time.Second
+
 type Client struct {
 	cfg          config.Config
 	printer      printer.Printer
 	queueManager *queue.Manager
 	storage      *storage.Store
+	jobs         *jobs.Registry
 
 	statusMu     sync.RWMutex
 	status       Status
@@ -53,14 +59,17 @@ type Client struct {
 	connMu   sync.Mutex
 	conn     net.Conn
 	lastPong time.Time
+
+	writeMu sync.Mutex // serialisasi penulisan frame ke koneksi
 }
 
-func New(cfg config.Config, p printer.Printer, qm *queue.Manager, store *storage.Store) *Client {
+func New(cfg config.Config, p printer.Printer, qm *queue.Manager, store *storage.Store, jobReg *jobs.Registry) *Client {
 	return &Client{
 		cfg:          cfg,
 		printer:      p,
 		queueManager: qm,
 		storage:      store,
+		jobs:         jobReg,
 		status:       StatusDisconnected,
 		statusCh:     make(chan Status, 16),
 	}
@@ -210,10 +219,20 @@ func (c *Client) connectAndServe(ctx context.Context) error {
 
 		var welcome apitypes.WelcomeMessage
 		if err := json.Unmarshal(frame.Payload, &welcome); err != nil {
+			raw := frame.Payload
+			if len(raw) > 2048 {
+				raw = raw[:2048]
+			}
+			slog.Warn("handshake frame not JSON", "raw", string(raw))
 			welcomeCh <- fmt.Errorf("parse welcome error: %w", err)
 			return
 		}
 		if welcome.Type != apitypes.TypeWelcome {
+			raw := frame.Payload
+			if len(raw) > 2048 {
+				raw = raw[:2048]
+			}
+			slog.Info("handshake frame (unexpected type)", "type", welcome.Type, "raw", string(raw))
 			welcomeCh <- fmt.Errorf("expected type welcome, got %s", welcome.Type)
 			return
 		}
@@ -344,6 +363,11 @@ func (c *Client) serveLoop(ctx context.Context, conn net.Conn) error {
 				c.lastPong = time.Now()
 				c.connMu.Unlock()
 
+			case ws.OpBinary:
+				// Bisa jadi pesan kontrol berformat JSON di frame binary.
+				payload := append([]byte(nil), frame.Payload...)
+				go c.handleControlMessage(payload, conn)
+
 			case ws.OpText:
 				var jobMeta apitypes.JobMessage
 				if err := json.Unmarshal(frame.Payload, &jobMeta); err != nil {
@@ -368,7 +392,13 @@ func (c *Client) serveLoop(ctx context.Context, conn net.Conn) error {
 
 					// Handle job secara async dengan concurrency kontrol
 					go c.handleJob(jobMeta, pdfData)
+					continue
 				}
+
+				// Pesan kontrol (mis. permintaan options/printer dari server).
+				// Jawab agar server tidak timeout menunggu respons.
+				payload := append([]byte(nil), frame.Payload...)
+				go c.handleControlMessage(payload, conn)
 			}
 		}
 	}()
@@ -383,6 +413,13 @@ func (c *Client) serveLoop(ctx context.Context, conn net.Conn) error {
 
 func (c *Client) handleJob(meta apitypes.JobMessage, pdfBytes []byte) {
 	start := time.Now()
+
+	jobCtx, cancelJob := context.WithCancel(context.Background())
+	defer cancelJob()
+	if c.jobs != nil {
+		c.jobs.Create(meta.JobID, meta.Printer, "ws")
+		c.jobs.SetCancel(meta.JobID, cancelJob)
+	}
 
 	ext := jobFileExt(meta)
 
@@ -419,7 +456,10 @@ func (c *Client) handleJob(meta apitypes.JobMessage, pdfBytes []byte) {
 	_ = tmp.Close()
 
 	// 2. Eksekusi print via Queue Manager
-	err = c.queueManager.Execute(context.Background(), meta.Printer, func(execCtx context.Context) error {
+	err = c.queueManager.Execute(jobCtx, meta.Printer, func(execCtx context.Context) error {
+		if c.jobs != nil {
+			c.jobs.Start(meta.JobID)
+		}
 		return c.printer.Print(execCtx, printer.Job{
 			JobID:       meta.JobID,
 			Printer:     meta.Printer,
@@ -457,6 +497,10 @@ func (c *Client) handleJob(meta apitypes.JobMessage, pdfBytes []byte) {
 			errCode = "PREPARE_FAILED"
 		}
 
+		if c.jobs != nil {
+			c.jobs.Finish(meta.JobID, err, errCode)
+		}
+
 		c.sendJobResult(apitypes.JobResultMessage{
 			Type:       apitypes.TypeJobResult,
 			JobID:      meta.JobID,
@@ -466,6 +510,9 @@ func (c *Client) handleJob(meta apitypes.JobMessage, pdfBytes []byte) {
 			DurationMs: duration,
 		})
 	} else {
+		if c.jobs != nil {
+			c.jobs.Finish(meta.JobID, nil, "")
+		}
 		c.sendJobResult(apitypes.JobResultMessage{
 			Type:       apitypes.TypeJobResult,
 			JobID:      meta.JobID,
@@ -508,7 +555,7 @@ func (c *Client) sendJobResult(res apitypes.JobResultMessage) {
 
 	var sent bool
 	if conn != nil {
-		if err := wsutil.WriteClientText(conn, data); err == nil {
+		if err := c.writeText(conn, data); err == nil {
 			sent = true
 			slog.Info("sent job result to server", "jobId", res.JobID, "success", res.Success, "durationMs", res.DurationMs)
 		} else {
@@ -543,5 +590,143 @@ func (c *Client) NotifyPrintersUpdate(printers []string) error {
 		return errors.New("websocket not connected")
 	}
 
+	return c.writeText(conn, data)
+}
+
+// handleControlMessage merespons pesan kontrol dari server (mis. permintaan
+// daftar opsi/port printer) agar server tidak timeout menunggu respons.
+func (c *Client) handleControlMessage(payload []byte, conn net.Conn) {
+	{
+		raw := payload
+		if len(raw) > 4096 {
+			raw = raw[:4096]
+		}
+		slog.Info("ws control message received", "raw", string(raw))
+	}
+	var msg map[string]interface{}
+	if err := json.Unmarshal(payload, &msg); err != nil {
+		return
+	}
+	msgType, _ := msg["type"].(string)
+
+	// Pertimbangkan juga field alternatif (action/command/request) untuk
+	// toleransi terhadap variasi protokol server.
+	candidates := []string{msgType}
+	for _, k := range []string{"action", "command", "request", "event"} {
+		if s, ok := msg[k].(string); ok && s != "" {
+			candidates = append(candidates, s)
+		}
+	}
+	lt := strings.ToLower(strings.Join(candidates, " "))
+
+	if strings.TrimSpace(lt) == "" {
+		return
+	}
+
+	hasID := false
+	for k := range msg {
+		if strings.Contains(strings.ToLower(k), "id") {
+			hasID = true
+			break
+		}
+	}
+	looksOptions := strings.Contains(lt, "option")
+	looksPrinters := strings.Contains(lt, "printer") && !strings.Contains(lt, "update")
+	looksRPC := strings.EqualFold(msgType, "request") || strings.EqualFold(msgType, "rpc")
+
+	if !looksOptions && !looksPrinters && !hasID && !looksRPC {
+		slog.Info("received unhandled control message", "type", msgType)
+		return
+	}
+
+	// Tentukan tipe respons: turunkan dari tipe request bila memungkinkan.
+	respType := "response"
+	switch {
+	case strings.HasSuffix(strings.ToLower(msgType), "_request"):
+		respType = msgType[:len(msgType)-len("_request")]
+	case looksPrinters:
+		respType = "printers"
+	case looksOptions:
+		respType = "options"
+	}
+
+	resp := map[string]interface{}{"type": respType, "agentId": c.cfg.Agent.ID}
+	echoCorrelation(resp, msg)
+
+	// Batasi waktu agar handler tak pernah menggantung dan selalu membalas.
+	opCtx, cancel := context.WithTimeout(context.Background(), controlTimeout)
+	defer cancel()
+
+	if respType == "printers" {
+		list, err := c.printer.List(opCtx)
+		if err != nil {
+			resp["success"] = false
+			resp["error"] = err.Error()
+		} else {
+			resp["success"] = true
+			resp["printers"] = list
+			resp["data"] = list
+			resp["result"] = list
+		}
+	} else {
+		opts, err := c.printer.Options(opCtx)
+		if err != nil {
+			resp["success"] = false
+			resp["error"] = err.Error()
+		} else {
+			resp["success"] = true
+			resp["types"] = opts.Types
+			resp["drivers"] = opts.Drivers
+			resp["ports"] = opts.Ports
+			resp["options"] = opts
+			resp["data"] = opts
+			resp["result"] = opts
+		}
+	}
+
+	c.writeControlJSON(conn, resp)
+	slog.Info("answered control request from server", "requestType", msgType, "responseType", respType)
+}
+
+var correlationKeys = []string{"requestId", "request_id", "reqId", "req_id", "id", "correlationId", "correlation_id"}
+
+// echoCorrelation menyalin SEMUA field korelasi (nama apa pun yang mengandung
+// "id") dari request ke response, agar server dapat mencocokkan respons.
+func echoCorrelation(resp, req map[string]interface{}) {
+	for k, v := range req {
+		if v == nil {
+			continue
+		}
+		if strings.Contains(strings.ToLower(k), "id") {
+			resp[k] = v
+		}
+	}
+	if _, ok := resp["id"]; !ok {
+		for _, k := range correlationKeys {
+			if v, ok := req[k]; ok && v != nil {
+				resp["id"] = v
+				resp["requestId"] = v
+				break
+			}
+		}
+	}
+}
+
+func (c *Client) writeText(conn net.Conn, data []byte) error {
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
 	return wsutil.WriteClientText(conn, data)
+}
+
+func (c *Client) writeControlJSON(conn net.Conn, v interface{}) {
+	if conn == nil {
+		return
+	}
+	data, err := json.Marshal(v)
+	if err != nil {
+		return
+	}
+	if err := c.writeText(conn, data); err != nil {
+		slog.Warn("send control response failed", "err", err)
+	}
 }

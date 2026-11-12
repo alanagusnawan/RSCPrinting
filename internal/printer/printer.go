@@ -71,6 +71,16 @@ type RegisterPrinterParams struct {
 	IsDefault  bool        `json:"isDefault,omitempty"`
 }
 
+// UpdatePrinterParams mendeskripsikan perubahan pada printer yang sudah ada.
+// Semua field opsional; hanya yang terisi yang diubah.
+type UpdatePrinterParams struct {
+	NewName    string      `json:"newName,omitempty"`
+	DriverName string      `json:"driverName,omitempty"`
+	Type       PrinterType `json:"type,omitempty"`
+	PortOrURI  string      `json:"portOrUri,omitempty"`
+	IsDefault  *bool       `json:"isDefault,omitempty"`
+}
+
 type PrinterTypeOption struct {
 	Type        PrinterType `json:"type"`
 	Label       string      `json:"label"`
@@ -126,5 +136,8 @@ type Printer interface {
 	List(ctx context.Context) ([]PrinterInfo, error)
 	Info(ctx context.Context, name string) (PrinterInfo, error)
 	Register(ctx context.Context, params RegisterPrinterParams) error
+	Update(ctx context.Context, name string, params UpdatePrinterParams) error
+	Remove(ctx context.Context, name string) error
+	SetDefault(ctx context.Context, name string) error
 	Options(ctx context.Context) (PrinterOptions, error)
 }

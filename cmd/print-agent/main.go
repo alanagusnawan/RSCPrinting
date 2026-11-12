@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -16,6 +17,7 @@ import (
 	"github.com/rscprinting/print-agent/internal/config"
 	"github.com/rscprinting/print-agent/internal/httpserver"
 	"github.com/rscprinting/print-agent/internal/instance"
+	"github.com/rscprinting/print-agent/internal/jobs"
 	"github.com/rscprinting/print-agent/internal/logger"
 	"github.com/rscprinting/print-agent/internal/printer"
 	"github.com/rscprinting/print-agent/internal/queue"
@@ -588,14 +590,29 @@ func runAgentWithMode(ctx context.Context, configPath, modeOverride string) {
 	log.Info("starting print agent", "version", version.Version, "agentId", cfg.Agent.ID, "mode", cfg.Mode)
 
 	// Single-instance: cegah service + autorun registry menjalankan dua agent.
-	release, already, lockErr := instance.Acquire("RSCPrinting-Agent")
-	if lockErr != nil {
-		log.Warn("single-instance lock tidak tersedia; lanjut tanpa lock", "err", lockErr)
-	} else if already {
+	// (1) named mutex machine-wide (best-effort; bisa gagal antar-sesi karena ACL).
+	instanceName := os.Getenv("PRINT_AGENT_INSTANCE")
+	if instanceName == "" {
+		instanceName = "RSCPrinting-Agent"
+	}
+	if releaseMtx, alreadyMtx, mutexErr := instance.Acquire(instanceName); mutexErr != nil {
+		log.Warn("single-instance mutex tidak tersedia", "err", mutexErr)
+	} else if alreadyMtx {
 		log.Warn("instance RSCPrinting lain sudah berjalan; keluar dari instance ini")
 		return
 	} else {
-		defer release()
+		defer releaseMtx()
+	}
+
+	// (2) lock file per-data-dir (authoritative; lintas sesi & tidak tergantung ACL mutex).
+	lockPath := filepath.Join(cfg.DataDir, ".agent.lock")
+	if releaseFile, alreadyFile, fileErr := instance.AcquireFile(lockPath); fileErr != nil {
+		log.Warn("lock file data dir tidak tersedia", "err", fileErr)
+	} else if alreadyFile {
+		log.Warn("instance lain memakai data dir ini; keluar dari instance ini")
+		return
+	} else {
+		defer releaseFile()
 	}
 
 	// Watchdog check
@@ -605,6 +622,10 @@ func runAgentWithMode(ctx context.Context, configPath, modeOverride string) {
 	// Storage BoltDB
 	store, err := storage.Open(cfg.DataDir)
 	if err != nil {
+		if errors.Is(err, storage.ErrLocked) {
+			log.Warn("instance lain memakai data dir ini (print-agent.db terkunci); keluar dari instance ini")
+			return
+		}
 		log.Error("failed to open boltdb storage", "err", err)
 		os.Exit(1)
 	}
@@ -620,11 +641,14 @@ func runAgentWithMode(ctx context.Context, configPath, modeOverride string) {
 	// Queue manager
 	qm := queue.NewManager(cfg.Queue.MaxConcurrentPerPrinter, cfg.Queue.MaxSizePerPrinter, cfg.Queue.JobTimeout)
 
+	// Job registry (untuk API /jobs)
+	jobReg := jobs.NewRegistry(200)
+
 	// WebSocket Client
-	wsClient := wsclient.New(cfg, p, qm, store)
+	wsClient := wsclient.New(cfg, p, qm, store, jobReg)
 
 	// Local HTTP Server
-	httpSrv := httpserver.New(cfg, wsClient, p, qm)
+	httpSrv := httpserver.New(cfg, wsClient, p, qm, jobReg)
 	go func() {
 		if err := httpSrv.Start(); err != nil {
 			log.Warn("local http server stopped", "err", err)

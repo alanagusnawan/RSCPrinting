@@ -343,18 +343,74 @@ Flag tambahan `serve`/`run`: `--data-dir <abs>`, `--hidden` (sembunyikan konsol)
 
 ---
 
+## Protokol WebSocket
+
+Agent membuka koneksi keluar ke `ws_server.url`. Pesan teks JSON (`type`):
+
+- **hello** (agent → server): `agentId`, `hostname`, `displayName`, `printers`, `version`, `os`.
+- **welcome** (server → agent): `serverTime`, `connectionId`.
+- **job** (server → agent): metadata job di frame teks, lalu **binary frame** berisi dokumen.
+- **job_result** (agent → server): `jobId`, `success`, `error`, `errorCode`, `durationMs`.
+- **printers_update** (agent → server): daftar nama printer terbaru.
+
+### Control request/response (opsional)
+Agar server tidak timeout menunggu, agent menjawab pesan kontrol:
+- Permintaan opsi printer (tipe mengandung `option`, mis. `get_options`) → dibalas `{"type":"options", success, options:{types,drivers,ports}, types, drivers, ports}`.
+- Permintaan daftar printer (tipe mengandung `printer`, mis. `get_printers`) → dibalas `{"type":"printers", success, printers:[...]}`.
+- Bila ada `requestId`/`id`/`correlationId`, nilainya di-echo di respons.
+
+---
+
 ## Local HTTP API
 
-Agent membuka loopback listener di `127.0.0.1:8080`:
-- `GET /health` — status WebSocket, versi, daftar printer lokal
-- `GET /docs` — Swagger UI
-- `GET /swagger.json` — spesifikasi OpenAPI / Swagger 2.0
-- `GET /version` — versi & commit build
-- `GET /printers` — daftar printer OS
-- `GET /printers/options` — tipe printer, nama driver, port tersedia
-- `POST /printers/register` — daftarkan printer (HTTP_SHARED/IP/USB/BLUETOOTH)
-- `GET /jobs/{id}` — status pemrosesan job lokal
-- `POST /print` — cetak lokal multi-format (nonaktif default; aktif bila `server.enable_local_print_endpoint: true` atau `mode: standalone`)
+Agent membuka loopback listener di `127.0.0.1:8080` (Swagger UI di `/docs`).
+Endpoint **mutasi** (POST/PUT/DELETE) hanya aktif bila `mode: standalone` atau
+`server.enable_local_print_endpoint: true`; endpoint GET selalu aktif.
+
+### System
+| Metode | Path | Fungsi |
+|---|---|---|
+| GET | `/health` | Status WebSocket, versi, daftar printer |
+| GET | `/version` | Versi & commit build |
+| GET | `/docs`, `/swagger.json` | Swagger UI & spesifikasi |
+
+### Printers (CRUD)
+| Metode | Path | Fungsi |
+|---|---|---|
+| GET | `/printers` | Daftar printer OS |
+| POST | `/printers` | Buat/daftarkan printer (`name`, `type`, `portOrUri`, `driverName`, `isDefault`) |
+| GET | `/printers/options` | Tipe printer, nama driver, port tersedia |
+| GET | `/printers/{name}` | Detail satu printer |
+| PUT | `/printers/{name}` | Update (rename `newName`, `driverName`, `type`, `portOrUri`, `isDefault`) |
+| DELETE | `/printers/{name}` | Hapus queue printer |
+| POST | `/printers/{name}/default` | Jadikan printer default |
+
+Contoh create/update:
+```bash
+curl -X POST http://127.0.0.1:8080/printers -H "Content-Type: application/json" \
+  -d '{"name":"Kasir-Network","type":"IP","portOrUri":"192.168.1.200","driverName":"Generic / Text Only"}'
+
+curl -X PUT http://127.0.0.1:8080/printers/Kasir-Network -H "Content-Type: application/json" \
+  -d '{"newName":"Kasir-Utama","isDefault":true}'
+```
+
+### Config
+| Metode | Path | Fungsi |
+|---|---|---|
+| GET | `/config/printers` | Baca bagian `printers` config |
+| PUT | `/config/printers` | Ganti `defaultName`/`allowlist`/`thermal` (ditulis ke `config.yaml`) |
+
+### Jobs
+| Metode | Path | Fungsi |
+|---|---|---|
+| GET | `/jobs` | Daftar job terakhir (terbaru dulu) |
+| GET | `/jobs/{id}` | Detail job |
+| DELETE | `/jobs/{id}` | Batalkan (bila berjalan) & hapus record |
+
+### Print
+| Metode | Path | Fungsi |
+|---|---|---|
+| POST | `/print` | Cetak lokal multi-format (`multipart/form-data`: `printer`, `format`, `file`) |
 
 ---
 

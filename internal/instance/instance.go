@@ -9,3 +9,10 @@ package instance
 func Acquire(name string) (release func(), already bool, err error) {
 	return acquire(name)
 }
+
+// AcquireFile mengambil lock exclusive pada file path (dibuat bila belum ada).
+// Cocok untuk single-instance per-data-dir: lintas sesi & tidak bergantung ACL
+// named mutex. Mengembalikan already=true bila file sedang dikunci proses lain.
+func AcquireFile(path string) (release func(), already bool, err error) {
+	return acquireFile(path)
+}

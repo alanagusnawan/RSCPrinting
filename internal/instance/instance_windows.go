@@ -37,3 +37,29 @@ func acquire(name string) (func(), bool, error) {
 	}
 	return nil, false, lastErr
 }
+
+// acquireFile mengunci file secara exclusive (share mode 0). Proses kedua yang
+// mencoba membuka file yang sama akan gagal (ERROR_SHARING_VIOLATION).
+func acquireFile(path string) (func(), bool, error) {
+	p, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		return nil, false, err
+	}
+	h, err := windows.CreateFile(
+		p,
+		windows.GENERIC_READ|windows.GENERIC_WRITE,
+		0, // no sharing -> exclusive
+		nil,
+		windows.OPEN_ALWAYS,
+		windows.FILE_ATTRIBUTE_NORMAL,
+		0,
+	)
+	if err != nil {
+		if err == windows.ERROR_SHARING_VIOLATION || err == windows.ERROR_LOCK_VIOLATION {
+			return func() {}, true, nil
+		}
+		return nil, false, err
+	}
+	handle := h
+	return func() { _ = windows.CloseHandle(handle) }, false, nil
+}
