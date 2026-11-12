@@ -4,8 +4,8 @@ server:
   port: 8080
   enable_local_print_endpoint: true # aktifkan hanya untuk standalone / testing
 ws_server:
-  url: "" # kosong = baca dari ./data/config atau env PRINT_AGENT_WS_URL (default: ws://localhost:5488/agent/ws)
-  token: "" # kosong = generate otomatis dan simpan di ./data/config atau env PRINT_AGENT_WS_TOKEN
+  url: "ws://172.16.0.208:5488/agent/ws" # Sesuaikan IP komputer RSCReporting jika berubah
+  token: "secret-print-token-12345"
   reconnectBackoffMax: 60s
   handshakeTimeout: 15s
   pingInterval: 30s

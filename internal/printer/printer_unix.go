@@ -197,6 +197,22 @@ func (p *UnixPrinter) Options(ctx context.Context) (PrinterOptions, error) {
 	}, nil
 }
 
+func (p *UnixPrinter) SetDefault(ctx context.Context, name string) error {
+	cmd := exec.CommandContext(ctx, "lpoptions", "-d", name)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("set default printer failed: %s (%w)", strings.TrimSpace(string(out)), err)
+	}
+	return nil
+}
+
+func (p *UnixPrinter) Delete(ctx context.Context, name string) error {
+	cmd := exec.CommandContext(ctx, "lpadmin", "-x", name)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("delete printer failed: %s (%w)", strings.TrimSpace(string(out)), err)
+	}
+	return nil
+}
+
 func listUnixDrivers(ctx context.Context) []string {
 	out, err := exec.CommandContext(ctx, "lpinfo", "-m").Output()
 	if err != nil {

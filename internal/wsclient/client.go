@@ -345,13 +345,41 @@ func (c *Client) serveLoop(ctx context.Context, conn net.Conn) error {
 				c.connMu.Unlock()
 
 			case ws.OpText:
-				var jobMeta apitypes.JobMessage
-				if err := json.Unmarshal(frame.Payload, &jobMeta); err != nil {
+				var generic struct {
+					Type apitypes.MessageType `json:"type"`
+				}
+				if err := json.Unmarshal(frame.Payload, &generic); err != nil {
 					slog.Warn("unmarshal text frame failed", "err", err)
 					continue
 				}
 
-				if jobMeta.Type == apitypes.TypeJob {
+				switch generic.Type {
+				case apitypes.TypeGetOptions:
+					var optMsg apitypes.GetOptionsMessage
+					_ = json.Unmarshal(frame.Payload, &optMsg)
+					go c.handleGetOptions(optMsg)
+
+				case apitypes.TypeRegisterPrinter:
+					var regMsg apitypes.RegisterPrinterMessage
+					_ = json.Unmarshal(frame.Payload, &regMsg)
+					go c.handleRegisterPrinter(regMsg)
+
+				case apitypes.TypeSetDefaultPrinter:
+					var defMsg apitypes.SetDefaultPrinterMessage
+					_ = json.Unmarshal(frame.Payload, &defMsg)
+					go c.handleSetDefaultPrinter(defMsg)
+
+				case apitypes.TypeDeletePrinter:
+					var delMsg apitypes.DeletePrinterMessage
+					_ = json.Unmarshal(frame.Payload, &delMsg)
+					go c.handleDeletePrinter(delMsg)
+
+				case apitypes.TypeJob:
+					var jobMeta apitypes.JobMessage
+					if err := json.Unmarshal(frame.Payload, &jobMeta); err != nil {
+						slog.Warn("unmarshal job meta failed", "err", err)
+						continue
+					}
 					// Tunggu frame binary berikutnya untuk byte PDF
 					binFrame, err := ws.ReadFrame(conn)
 					if err != nil {
@@ -521,6 +549,135 @@ func (c *Client) sendJobResult(res apitypes.JobResultMessage) {
 			slog.Error("failed to save pending result to boltdb", "jobId", res.JobID, "err", err)
 		} else {
 			slog.Info("saved pending job result to boltdb", "jobId", res.JobID)
+		}
+	}
+}
+
+func (c *Client) handleGetOptions(msg apitypes.GetOptionsMessage) {
+	slog.Info("received get_options request from server", "requestId", msg.RequestID)
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+
+	opts, err := c.printer.Options(ctx)
+	res := apitypes.OptionsResultMessage{
+		Type:      apitypes.TypeOptionsResult,
+		RequestID: msg.RequestID,
+		Success:   err == nil,
+		Options:   opts,
+	}
+	if err != nil {
+		res.Error = err.Error()
+	}
+	data, err := json.Marshal(res)
+	if err != nil {
+		slog.Error("marshal options result failed", "err", err)
+		return
+	}
+	c.connMu.Lock()
+	conn := c.conn
+	c.connMu.Unlock()
+	if conn != nil {
+		if writeErr := wsutil.WriteClientText(conn, data); writeErr != nil {
+			slog.Error("failed to write options result to server", "err", writeErr)
+		} else {
+			slog.Info("sent options result to server successfully", "requestId", msg.RequestID)
+		}
+	}
+}
+
+func (c *Client) handleRegisterPrinter(msg apitypes.RegisterPrinterMessage) {
+	err := c.printer.Register(context.Background(), printer.RegisterPrinterParams{
+		Name:       msg.Name,
+		DriverName: msg.DriverName,
+		Type:       printer.PrinterType(msg.PrinterType),
+		PortOrURI:  msg.PortOrURI,
+		IsDefault:  msg.IsDefault,
+	})
+	res := apitypes.RegisterPrinterResultMessage{
+		Type:      apitypes.TypeRegisterPrinterResult,
+		RequestID: msg.RequestID,
+		Success:   err == nil,
+		Printer:   msg.Name,
+	}
+	if err != nil {
+		res.Error = err.Error()
+	}
+	data, _ := json.Marshal(res)
+	c.connMu.Lock()
+	conn := c.conn
+	c.connMu.Unlock()
+	if conn != nil {
+		_ = wsutil.WriteClientText(conn, data)
+	}
+
+	// Jika registrasi berhasil, sinkronkan daftar printer terbaru ke server
+	if err == nil {
+		if list, listErr := c.printer.List(context.Background()); listErr == nil {
+			var names []string
+			for _, p := range list {
+				names = append(names, p.Name)
+			}
+			_ = c.NotifyPrintersUpdate(names)
+		}
+	}
+}
+
+func (c *Client) handleSetDefaultPrinter(msg apitypes.SetDefaultPrinterMessage) {
+	err := c.printer.SetDefault(context.Background(), msg.Printer)
+	res := apitypes.SetDefaultResultMessage{
+		Type:      apitypes.TypeSetDefaultResult,
+		RequestID: msg.RequestID,
+		Success:   err == nil,
+		Printer:   msg.Printer,
+	}
+	if err != nil {
+		res.Error = err.Error()
+	}
+	data, _ := json.Marshal(res)
+	c.connMu.Lock()
+	conn := c.conn
+	c.connMu.Unlock()
+	if conn != nil {
+		_ = wsutil.WriteClientText(conn, data)
+	}
+
+	if err == nil {
+		if list, listErr := c.printer.List(context.Background()); listErr == nil {
+			var names []string
+			for _, p := range list {
+				names = append(names, p.Name)
+			}
+			_ = c.NotifyPrintersUpdate(names)
+		}
+	}
+}
+
+func (c *Client) handleDeletePrinter(msg apitypes.DeletePrinterMessage) {
+	err := c.printer.Delete(context.Background(), msg.Printer)
+	res := apitypes.DeletePrinterResultMessage{
+		Type:      apitypes.TypeDeletePrinterResult,
+		RequestID: msg.RequestID,
+		Success:   err == nil,
+		Printer:   msg.Printer,
+	}
+	if err != nil {
+		res.Error = err.Error()
+	}
+	data, _ := json.Marshal(res)
+	c.connMu.Lock()
+	conn := c.conn
+	c.connMu.Unlock()
+	if conn != nil {
+		_ = wsutil.WriteClientText(conn, data)
+	}
+
+	if err == nil {
+		if list, listErr := c.printer.List(context.Background()); listErr == nil {
+			var names []string
+			for _, p := range list {
+				names = append(names, p.Name)
+			}
+			_ = c.NotifyPrintersUpdate(names)
 		}
 	}
 }

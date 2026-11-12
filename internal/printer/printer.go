@@ -127,4 +127,6 @@ type Printer interface {
 	Info(ctx context.Context, name string) (PrinterInfo, error)
 	Register(ctx context.Context, params RegisterPrinterParams) error
 	Options(ctx context.Context) (PrinterOptions, error)
+	SetDefault(ctx context.Context, name string) error
+	Delete(ctx context.Context, name string) error
 }
