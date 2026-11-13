@@ -96,14 +96,26 @@ func TestWSClientHandshakeAndTwoFrameJob(t *testing.T) {
 			return
 		}
 
-		// 4. Wait for job_result
-		resBytes, resOp, err := wsutil.ReadClientData(conn)
-		if err != nil || resOp != ws.OpText {
-			t.Errorf("read job result error: %v", err)
+		// 4. Wait for job_result (lewati pesan kontrol seperti printers_detail).
+		for {
+			resBytes, resOp, err := wsutil.ReadClientData(conn)
+			if err != nil || resOp != ws.OpText {
+				t.Errorf("read job result error: %v", err)
+				return
+			}
+			var probe struct {
+				Type apitypes.MessageType `json:"type"`
+			}
+			if err := json.Unmarshal(resBytes, &probe); err != nil {
+				continue
+			}
+			if probe.Type != apitypes.TypeJobResult {
+				continue
+			}
+			_ = json.Unmarshal(resBytes, &serverReceivedResult)
+			close(receivedResultSignal)
 			return
 		}
-		_ = json.Unmarshal(resBytes, &serverReceivedResult)
-		close(receivedResultSignal)
 	}))
 	defer server.Close()
 

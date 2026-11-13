@@ -352,12 +352,48 @@ Agent membuka koneksi keluar ke `ws_server.url`. Pesan teks JSON (`type`):
 - **job** (server → agent): metadata job di frame teks, lalu **binary frame** berisi dokumen.
 - **job_result** (agent → server): `jobId`, `success`, `error`, `errorCode`, `durationMs`.
 - **printers_update** (agent → server): daftar nama printer terbaru.
+- **printers_detail** (agent → server): hostname, `os`, `ips[]`, dan per printer endpoint share (`shared`, `shareName`, `protocol`, `smbPath`, `ippUri`, `socketUri`, `relayUri`). Dikirim saat connect & setelah perubahan.
 
 ### Control request/response (opsional)
 Agar server tidak timeout menunggu, agent menjawab pesan kontrol:
 - Permintaan opsi printer (tipe mengandung `option`, mis. `get_options`) → dibalas `{"type":"options", success, options:{types,drivers,ports}, types, drivers, ports}`.
 - Permintaan daftar printer (tipe mengandung `printer`, mis. `get_printers`) → dibalas `{"type":"printers", success, printers:[...]}`.
 - Bila ada `requestId`/`id`/`correlationId`, nilainya di-echo di respons.
+
+### Perintah printer (server → agent)
+Semua membalas pesan `*_result` ber-`requestId` dan diikuti `printers_update` + `printers_detail`:
+
+| Perintah | Fungsi |
+|---|---|
+| `register_printer` | Pasang queue OS (`name`, `printerType`, `portOrUri`, `driverName`, `ppd`, `driverless`, `isDefault`). Idempotent. |
+| `update_printer` | Repoint/rename queue yang sudah ada (mis. saat IP sumber berubah). |
+| `delete_printer` | Copot queue. |
+| `set_default_printer` | Set default printer OS. |
+| `sync_printers` | Pasang beberapa printer sekaligus (bulk) + opsional `prune`. |
+| `share_printer` / `unshare_printer` | Bagikan / hentikan pembagian printer lokal. |
+
+---
+
+## Cetak Lintas-Komputer (B cetak lewat printer A)
+
+Skenario: **A** punya printer terpasang; dari dashboard server, admin meng-klik "Install" untuk **B**,
+sehingga di B muncul queue printer A. Saat user mencetak dari Word di B, job dikirim ke A dan A mencetak.
+
+Dua model:
+
+- **Model 1 — Berbagi lewat OS** (sesama Windows / sesama Unix):
+  - A Windows → share SMB `\\HOST_A\RSC-<printer>`; A Unix → CUPS IPP `ipp://HOST_A.local:631/printers/<printer>`.
+  - B memasang queue ke endpoint itu (`register_printer` dengan `printerType: HTTP_SHARED`).
+- **Model 2 — Relay IPP** (`printers.share.relayEnabled: true`, cross-OS & driverless):
+  - A membuka listener IPP (`relayPort`, default 19100). B memasang `ipp://HOST_A:<relayPort>/printers/<printer>`.
+  - Dokumen yang diterima A dirender/dicetak lewat pipeline yang sudah ada.
+
+**IP dinamis (DHCP):** endpoint memakai **hostname** (bukan IP) agar spooler me-resolve ulang tiap job;
+selain itu agent A melaporkan `printers_detail` (hostname + IP terbaru) tiap connect / saat berubah,
+dan server dapat mengirim `update_printer` ke B untuk repoint. IP hanya fallback.
+
+**Prasyarat:** A menyala saat jam kerja; firewall membuka `631` (IPP), `445/139` (SMB), dan `relayPort`;
+hak admin/root saat share/install; Linux A: `avahi-daemon` untuk mDNS.
 
 ---
 
@@ -384,6 +420,9 @@ Endpoint **mutasi** (POST/PUT/DELETE) hanya aktif bila `mode: standalone` atau
 | PUT | `/printers/{name}` | Update (rename `newName`, `driverName`, `type`, `portOrUri`, `isDefault`) |
 | DELETE | `/printers/{name}` | Hapus queue printer |
 | POST | `/printers/{name}/default` | Jadikan printer default |
+| POST | `/printers/{name}/share` | Bagikan printer lokal (opsional body `{protocol,shareName}`) |
+| POST | `/printers/{name}/unshare` | Hentikan pembagian printer |
+| POST | `/printers/sync` | Pasang beberapa printer sekaligus (`{printers:[...],prune}`) |
 
 Contoh create/update:
 ```bash

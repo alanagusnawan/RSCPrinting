@@ -57,6 +57,19 @@ type PrintersConfig struct {
 	Allowlist    []string               `yaml:"allowlist"`
 	PollInterval time.Duration          `yaml:"pollInterval"`
 	Thermal      []ThermalPrinterConfig `yaml:"thermal"`
+	Share        ShareConfig            `yaml:"share"`
+}
+
+// ShareConfig mengatur pembagian printer lokal agar bisa dipasang di komputer
+// lain (cetak lintas-komputer).
+type ShareConfig struct {
+	Enabled     bool   `yaml:"enabled"`     // aktifkan auto-share saat agent start
+	Protocol    string `yaml:"protocol"`    // auto | smb | ipp
+	NamePattern string `yaml:"namePattern"` // pola nama share, mis. "RSC-%s"
+	// Relay (Model 2) untuk cross-OS: agent membuka listener agar device lain
+	// bisa mencetak lewat agent ini.
+	RelayEnabled bool `yaml:"relayEnabled"`
+	RelayPort    int  `yaml:"relayPort"` // port dasar listener RAW (default 19100)
 }
 
 // ThermalPrinterConfig mengatur printer ESC/POS yang dicetak dengan jalur raster
@@ -213,6 +226,12 @@ func DefaultConfig() Config {
 			DefaultName:  "",
 			Allowlist:    []string{},
 			PollInterval: 5 * time.Minute,
+			Share: ShareConfig{
+				Enabled:     true,
+				Protocol:    "auto",
+				NamePattern: "RSC-%s",
+				RelayPort:   19100,
+			},
 		},
 		Ghostscript: GhostscriptConfig{
 			Path: "",

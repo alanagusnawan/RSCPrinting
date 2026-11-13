@@ -127,10 +127,26 @@ func (m *MockPrinter) Options(ctx context.Context) (PrinterOptions, error) {
 	}, nil
 }
 
-func (m *MockPrinter) SetDefault(ctx context.Context, name string) error {
-	return nil
+func (m *MockPrinter) Share(ctx context.Context, name string, opts ShareOptions) (PrinterShare, error) {
+	if _, err := m.Info(ctx, name); err != nil {
+		return PrinterShare{}, err
+	}
+	share := opts.ShareName
+	if share == "" {
+		share = "RSC-" + name
+	}
+	return PrinterShare{
+		Name:      name,
+		Protocol:  "ipp",
+		ShareName: share,
+		Host:      "mock-host",
+		IPPURI:    "ipp://mock-host:631/printers/" + name,
+	}, nil
 }
 
-func (m *MockPrinter) Delete(ctx context.Context, name string) error {
+func (m *MockPrinter) Unshare(ctx context.Context, name string) error {
+	if _, err := m.Info(ctx, name); err != nil {
+		return err
+	}
 	return nil
 }

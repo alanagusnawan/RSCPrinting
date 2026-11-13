@@ -44,6 +44,9 @@ const (
 // get_printers) agar agent selalu membalas sebelum server timeout.
 const controlTimeout = 5 * time.Second
 
+// printerOpTimeout membatasi operasi pasang/ubah/hapus/share printer OS.
+const printerOpTimeout = 20 * time.Second
+
 type Client struct {
 	cfg          config.Config
 	printer      printer.Printer
@@ -61,6 +64,9 @@ type Client struct {
 	lastPong time.Time
 
 	writeMu sync.Mutex // serialisasi penulisan frame ke koneksi
+
+	shareMu    sync.Mutex
+	shareCache map[string]printer.PrinterShare
 }
 
 func New(cfg config.Config, p printer.Printer, qm *queue.Manager, store *storage.Store, jobReg *jobs.Registry) *Client {
@@ -72,6 +78,7 @@ func New(cfg config.Config, p printer.Printer, qm *queue.Manager, store *storage
 		jobs:         jobReg,
 		status:       StatusDisconnected,
 		statusCh:     make(chan Status, 16),
+		shareCache:   make(map[string]printer.PrinterShare),
 	}
 }
 
@@ -264,6 +271,11 @@ func (c *Client) connectAndServe(ctx context.Context) error {
 	// 3. Flush pending results from BoltDB
 	c.flushPendingResults(ctx)
 
+	// 3b. Laporkan detail printer + endpoint share ke server (best effort).
+	if err := c.PublishPrintersDetail(ctx); err != nil {
+		slog.Warn("publish printers detail failed", "err", err)
+	}
+
 	// 4. Start Ping ticker and read loop
 	return c.serveLoop(ctx, conn)
 }
@@ -382,21 +394,49 @@ func (c *Client) serveLoop(ctx context.Context, conn net.Conn) error {
 					var optMsg apitypes.GetOptionsMessage
 					_ = json.Unmarshal(frame.Payload, &optMsg)
 					go c.handleGetOptions(optMsg)
+					continue
 
 				case apitypes.TypeRegisterPrinter:
 					var regMsg apitypes.RegisterPrinterMessage
 					_ = json.Unmarshal(frame.Payload, &regMsg)
 					go c.handleRegisterPrinter(regMsg)
+					continue
 
 				case apitypes.TypeSetDefaultPrinter:
 					var defMsg apitypes.SetDefaultPrinterMessage
 					_ = json.Unmarshal(frame.Payload, &defMsg)
 					go c.handleSetDefaultPrinter(defMsg)
+					continue
 
 				case apitypes.TypeDeletePrinter:
 					var delMsg apitypes.DeletePrinterMessage
 					_ = json.Unmarshal(frame.Payload, &delMsg)
 					go c.handleDeletePrinter(delMsg)
+					continue
+
+				case apitypes.TypeUpdatePrinter:
+					var updMsg apitypes.UpdatePrinterMessage
+					_ = json.Unmarshal(frame.Payload, &updMsg)
+					go c.handleUpdatePrinter(updMsg)
+					continue
+
+				case apitypes.TypeSyncPrinters:
+					var syncMsg apitypes.SyncPrintersMessage
+					_ = json.Unmarshal(frame.Payload, &syncMsg)
+					go c.handleSyncPrinters(syncMsg)
+					continue
+
+				case apitypes.TypeSharePrinter:
+					var shMsg apitypes.SharePrinterMessage
+					_ = json.Unmarshal(frame.Payload, &shMsg)
+					go c.handleSharePrinter(shMsg)
+					continue
+
+				case apitypes.TypeUnsharePrinter:
+					var unshMsg apitypes.UnsharePrinterMessage
+					_ = json.Unmarshal(frame.Payload, &unshMsg)
+					go c.handleUnsharePrinter(unshMsg)
+					continue
 
 				case apitypes.TypeJob:
 					var jobMeta apitypes.JobMessage
@@ -632,13 +672,47 @@ func (c *Client) handleGetOptions(msg apitypes.GetOptionsMessage) {
 	}
 }
 
+// writeJSON mengirim sebuah pesan JSON ke server via koneksi aktif.
+func (c *Client) writeJSON(v interface{}) {
+	data, err := json.Marshal(v)
+	if err != nil {
+		slog.Error("marshal ws message failed", "err", err)
+		return
+	}
+	c.connMu.Lock()
+	conn := c.conn
+	c.connMu.Unlock()
+	if conn == nil {
+		return
+	}
+	if err := c.writeText(conn, data); err != nil {
+		slog.Warn("send ws message failed", "err", err)
+	}
+}
+
+// notifyPrintersUpdate mengirim daftar nama printer + detail share terbaru.
+func (c *Client) notifyPrintersUpdate(ctx context.Context) {
+	if list, err := c.printer.List(ctx); err == nil {
+		names := make([]string, 0, len(list))
+		for _, p := range list {
+			names = append(names, p.Name)
+		}
+		_ = c.NotifyPrintersUpdate(names)
+	}
+	_ = c.PublishPrintersDetail(ctx)
+}
+
 func (c *Client) handleRegisterPrinter(msg apitypes.RegisterPrinterMessage) {
-	err := c.printer.Register(context.Background(), printer.RegisterPrinterParams{
+	ctx, cancel := context.WithTimeout(context.Background(), printerOpTimeout)
+	defer cancel()
+	err := c.printer.Register(ctx, printer.RegisterPrinterParams{
 		Name:       msg.Name,
 		DriverName: msg.DriverName,
 		Type:       printer.PrinterType(msg.PrinterType),
 		PortOrURI:  msg.PortOrURI,
 		IsDefault:  msg.IsDefault,
+		PPD:        msg.PPD,
+		Driverless: msg.Driverless,
 	})
 	res := apitypes.RegisterPrinterResultMessage{
 		Type:      apitypes.TypeRegisterPrinterResult,
@@ -649,28 +723,17 @@ func (c *Client) handleRegisterPrinter(msg apitypes.RegisterPrinterMessage) {
 	if err != nil {
 		res.Error = err.Error()
 	}
-	data, _ := json.Marshal(res)
-	c.connMu.Lock()
-	conn := c.conn
-	c.connMu.Unlock()
-	if conn != nil {
-		_ = wsutil.WriteClientText(conn, data)
-	}
+	c.writeJSON(res)
 
-	// Jika registrasi berhasil, sinkronkan daftar printer terbaru ke server
 	if err == nil {
-		if list, listErr := c.printer.List(context.Background()); listErr == nil {
-			var names []string
-			for _, p := range list {
-				names = append(names, p.Name)
-			}
-			_ = c.NotifyPrintersUpdate(names)
-		}
+		c.notifyPrintersUpdate(ctx)
 	}
 }
 
 func (c *Client) handleSetDefaultPrinter(msg apitypes.SetDefaultPrinterMessage) {
-	err := c.printer.SetDefault(context.Background(), msg.Printer)
+	ctx, cancel := context.WithTimeout(context.Background(), printerOpTimeout)
+	defer cancel()
+	err := c.printer.SetDefault(ctx, msg.Printer)
 	res := apitypes.SetDefaultResultMessage{
 		Type:      apitypes.TypeSetDefaultResult,
 		RequestID: msg.RequestID,
@@ -680,27 +743,17 @@ func (c *Client) handleSetDefaultPrinter(msg apitypes.SetDefaultPrinterMessage) 
 	if err != nil {
 		res.Error = err.Error()
 	}
-	data, _ := json.Marshal(res)
-	c.connMu.Lock()
-	conn := c.conn
-	c.connMu.Unlock()
-	if conn != nil {
-		_ = wsutil.WriteClientText(conn, data)
-	}
+	c.writeJSON(res)
 
 	if err == nil {
-		if list, listErr := c.printer.List(context.Background()); listErr == nil {
-			var names []string
-			for _, p := range list {
-				names = append(names, p.Name)
-			}
-			_ = c.NotifyPrintersUpdate(names)
-		}
+		c.notifyPrintersUpdate(ctx)
 	}
 }
 
 func (c *Client) handleDeletePrinter(msg apitypes.DeletePrinterMessage) {
-	err := c.printer.Delete(context.Background(), msg.Printer)
+	ctx, cancel := context.WithTimeout(context.Background(), printerOpTimeout)
+	defer cancel()
+	err := c.printer.Remove(ctx, msg.Printer)
 	res := apitypes.DeletePrinterResultMessage{
 		Type:      apitypes.TypeDeletePrinterResult,
 		RequestID: msg.RequestID,
@@ -710,23 +763,257 @@ func (c *Client) handleDeletePrinter(msg apitypes.DeletePrinterMessage) {
 	if err != nil {
 		res.Error = err.Error()
 	}
-	data, _ := json.Marshal(res)
+	c.writeJSON(res)
+
+	if err == nil {
+		c.shareMu.Lock()
+		delete(c.shareCache, msg.Printer)
+		c.shareMu.Unlock()
+		c.notifyPrintersUpdate(ctx)
+	}
+}
+
+func (c *Client) handleUpdatePrinter(msg apitypes.UpdatePrinterMessage) {
+	ctx, cancel := context.WithTimeout(context.Background(), printerOpTimeout)
+	defer cancel()
+	err := c.printer.Update(ctx, msg.Printer, printer.UpdatePrinterParams{
+		NewName:    msg.NewName,
+		DriverName: msg.DriverName,
+		Type:       printer.PrinterType(msg.PrinterType),
+		PortOrURI:  msg.PortOrURI,
+		IsDefault:  msg.IsDefault,
+	})
+	res := apitypes.UpdatePrinterResultMessage{
+		Type:      apitypes.TypeUpdatePrinterResult,
+		RequestID: msg.RequestID,
+		Success:   err == nil,
+		Printer:   msg.Printer,
+	}
+	if msg.NewName != "" {
+		res.Printer = msg.NewName
+	}
+	if err != nil {
+		res.Error = err.Error()
+	}
+	c.writeJSON(res)
+
+	if err == nil {
+		c.notifyPrintersUpdate(ctx)
+	}
+}
+
+func (c *Client) handleSyncPrinters(msg apitypes.SyncPrintersMessage) {
+	ctx, cancel := context.WithTimeout(context.Background(), printerOpTimeout)
+	defer cancel()
+
+	current, _ := c.printer.List(ctx)
+	have := make(map[string]bool, len(current))
+	for _, p := range current {
+		have[p.Name] = true
+	}
+
+	res := apitypes.SyncPrintersResultMessage{
+		Type:      apitypes.TypeSyncPrintersResult,
+		RequestID: msg.RequestID,
+		Failed:    map[string]string{},
+	}
+
+	for _, spec := range msg.Printers {
+		params := printer.RegisterPrinterParams{
+			Name:       spec.Name,
+			DriverName: spec.DriverName,
+			Type:       printer.PrinterType(spec.PrinterType),
+			PortOrURI:  spec.PortOrURI,
+			IsDefault:  spec.IsDefault,
+			PPD:        spec.PPD,
+			Driverless: spec.Driverless,
+		}
+		if err := c.printer.Register(ctx, params); err != nil {
+			res.Failed[spec.Name] = err.Error()
+			continue
+		}
+		if have[spec.Name] {
+			res.Updated = append(res.Updated, spec.Name)
+		} else {
+			res.Installed = append(res.Installed, spec.Name)
+		}
+	}
+
+	if msg.Prune {
+		want := make(map[string]bool, len(msg.Printers))
+		for _, spec := range msg.Printers {
+			want[spec.Name] = true
+		}
+		for _, p := range current {
+			if want[p.Name] {
+				continue
+			}
+			if err := c.printer.Remove(ctx, p.Name); err != nil {
+				res.Failed[p.Name] = err.Error()
+			} else {
+				res.Removed = append(res.Removed, p.Name)
+			}
+		}
+	}
+
+	res.Success = len(res.Failed) == 0
+	c.writeJSON(res)
+	c.notifyPrintersUpdate(ctx)
+}
+
+func (c *Client) handleSharePrinter(msg apitypes.SharePrinterMessage) {
+	ctx, cancel := context.WithTimeout(context.Background(), printerOpTimeout)
+	defer cancel()
+	share, err := c.printer.Share(ctx, msg.Printer, printer.ShareOptions{
+		Protocol:  printer.ShareProtocol(msg.Protocol),
+		ShareName: msg.ShareName,
+	})
+	res := apitypes.SharePrinterResultMessage{
+		Type:      apitypes.TypeSharePrinterResult,
+		RequestID: msg.RequestID,
+		Success:   err == nil,
+		Printer:   msg.Printer,
+	}
+	if err != nil {
+		res.Error = err.Error()
+	} else {
+		res.Protocol = share.Protocol
+		res.ShareName = share.ShareName
+		res.SMBPath = share.SMBPath
+		res.IPPURI = share.IPPURI
+		res.SocketURI = share.SocketURI
+		c.shareMu.Lock()
+		c.shareCache[msg.Printer] = share
+		c.shareMu.Unlock()
+	}
+	c.writeJSON(res)
+	_ = c.PublishPrintersDetail(ctx)
+}
+
+func (c *Client) handleUnsharePrinter(msg apitypes.UnsharePrinterMessage) {
+	ctx, cancel := context.WithTimeout(context.Background(), printerOpTimeout)
+	defer cancel()
+	err := c.printer.Unshare(ctx, msg.Printer)
+	res := apitypes.UnsharePrinterResultMessage{
+		Type:      apitypes.TypeUnsharePrinterResult,
+		RequestID: msg.RequestID,
+		Success:   err == nil,
+		Printer:   msg.Printer,
+	}
+	if err != nil {
+		res.Error = err.Error()
+	} else {
+		c.shareMu.Lock()
+		delete(c.shareCache, msg.Printer)
+		c.shareMu.Unlock()
+	}
+	c.writeJSON(res)
+	_ = c.PublishPrintersDetail(ctx)
+}
+
+// shareAllowed memeriksa apakah printer termasuk allowlist (kosong = semua).
+func (c *Client) shareAllowed(name string) bool {
+	al := c.cfg.Printers.Allowlist
+	if len(al) == 0 {
+		return true
+	}
+	for _, n := range al {
+		if n == name {
+			return true
+		}
+	}
+	return false
+}
+
+// shareNameFor membentuk nama share dari pola config (mis. "RSC-%s").
+func (c *Client) shareNameFor(name string) string {
+	pattern := c.cfg.Printers.Share.NamePattern
+	if pattern == "" {
+		return ""
+	}
+	if strings.Contains(pattern, "%s") {
+		return fmt.Sprintf(pattern, name)
+	}
+	return pattern
+}
+
+// shareFor mengembalikan endpoint share sebuah printer (dengan cache).
+func (c *Client) shareFor(ctx context.Context, name string) (printer.PrinterShare, error) {
+	if !c.cfg.Printers.Share.Enabled {
+		return printer.PrinterShare{}, nil
+	}
+	if !c.shareAllowed(name) {
+		return printer.PrinterShare{}, nil
+	}
+	c.shareMu.Lock()
+	if s, ok := c.shareCache[name]; ok {
+		c.shareMu.Unlock()
+		return s, nil
+	}
+	c.shareMu.Unlock()
+
+	share, err := c.printer.Share(ctx, name, printer.ShareOptions{
+		Protocol:  printer.ShareProtocol(c.cfg.Printers.Share.Protocol),
+		ShareName: c.shareNameFor(name),
+	})
+	if err != nil {
+		return printer.PrinterShare{}, err
+	}
+	c.shareMu.Lock()
+	c.shareCache[name] = share
+	c.shareMu.Unlock()
+	return share, nil
+}
+
+// PublishPrintersDetail mengirim detail printer + endpoint share ke server.
+func (c *Client) PublishPrintersDetail(ctx context.Context) error {
+	list, err := c.printer.List(ctx)
+	if err != nil {
+		return err
+	}
+
+	msg := apitypes.PrintersDetailMessage{
+		Type:     apitypes.TypePrintersDetail,
+		AgentID:  c.cfg.Agent.ID,
+		Hostname: printer.LocalHostname(),
+		OS:       runtime.GOOS,
+		IPs:      printer.LocalIPs(),
+	}
+	for _, p := range list {
+		d := apitypes.PrinterDetail{
+			Name:      p.Name,
+			IsDefault: p.IsDefault,
+			Status:    p.Status,
+		}
+		if share, serr := c.shareFor(ctx, p.Name); serr == nil && share.Name != "" {
+			d.Shared = true
+			d.ShareName = share.ShareName
+			d.Protocol = share.Protocol
+			d.SMBPath = share.SMBPath
+			d.IPPURI = share.IPPURI
+			d.SocketURI = share.SocketURI
+		}
+		if c.cfg.Printers.Share.RelayEnabled {
+			port := c.cfg.Printers.Share.RelayPort
+			if port <= 0 {
+				port = 19100
+			}
+			d.RelayURI = fmt.Sprintf("ipp://%s:%d/printers/%s", printer.LocalHostname(), port, p.Name)
+		}
+		msg.Printers = append(msg.Printers, d)
+	}
+
+	data, err := json.Marshal(msg)
+	if err != nil {
+		return err
+	}
 	c.connMu.Lock()
 	conn := c.conn
 	c.connMu.Unlock()
-	if conn != nil {
-		_ = wsutil.WriteClientText(conn, data)
+	if conn == nil {
+		return errors.New("websocket not connected")
 	}
-
-	if err == nil {
-		if list, listErr := c.printer.List(context.Background()); listErr == nil {
-			var names []string
-			for _, p := range list {
-				names = append(names, p.Name)
-			}
-			_ = c.NotifyPrintersUpdate(names)
-		}
-	}
+	return c.writeText(conn, data)
 }
 
 func (c *Client) NotifyPrintersUpdate(printers []string) error {

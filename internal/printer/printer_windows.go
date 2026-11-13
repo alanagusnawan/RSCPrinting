@@ -423,31 +423,65 @@ func (p *WindowsPrinter) Info(ctx context.Context, name string) (PrinterInfo, er
 	return PrinterInfo{}, ErrPrinterNotFound
 }
 
+// escapePS meng-escape tanda kutip tunggal untuk skrip PowerShell.
+func escapePS(s string) string { return strings.ReplaceAll(s, "'", "''") }
+
+func runPS(ctx context.Context, script string) (string, error) {
+	out, err := exec.CommandContext(ctx, "powershell", "-NoProfile", "-NonInteractive", "-Command", script).CombinedOutput()
+	return strings.TrimSpace(string(out)), err
+}
+
+// defaultWindowsDriver memilih driver bawaan bila driver tidak diberikan.
+func defaultWindowsDriver(params RegisterPrinterParams) string {
+	switch params.Type {
+	case PrinterTypeHTTPShared:
+		return "Microsoft IPP Class Driver"
+	default:
+		return "Generic / Text Only"
+	}
+}
+
+// Register memasang queue printer. Idempotent: bila printer sudah ada,
+// konfigurasi diperbarui (repoint/rename) alih-alih gagal.
 func (p *WindowsPrinter) Register(ctx context.Context, params RegisterPrinterParams) error {
-	driver := params.DriverName
-	if driver == "" {
-		driver = "Generic / Text Only"
+	if strings.TrimSpace(params.Name) == "" {
+		return fmt.Errorf("printer name required")
+	}
+	cleanName := escapePS(params.Name)
+
+	// Printer sudah ada -> perbarui (repoint) saja.
+	if _, err := p.Info(ctx, params.Name); err == nil {
+		isDef := params.IsDefault
+		return p.Update(ctx, params.Name, UpdatePrinterParams{
+			DriverName: params.DriverName,
+			Type:       params.Type,
+			PortOrURI:  params.PortOrURI,
+			IsDefault:  &isDef,
+		})
 	}
 
-	cleanName := strings.ReplaceAll(params.Name, "'", "''")
-	cleanDriver := strings.ReplaceAll(driver, "'", "''")
-	cleanPort := strings.ReplaceAll(params.PortOrURI, "'", "''")
+	driver := params.DriverName
+	if driver == "" {
+		driver = defaultWindowsDriver(params)
+	}
+	cleanDriver := escapePS(driver)
 
 	var psScript string
 
 	switch params.Type {
 	case PrinterTypeHTTPShared:
-		psScript = fmt.Sprintf("Add-Printer -ConnectionName '%s'", cleanPort)
+		// Bisa UNC (\\host\share) atau URL IPP/http.
+		psScript = fmt.Sprintf("Add-Printer -ConnectionName '%s'", escapePS(params.PortOrURI))
 	case PrinterTypeIP:
-		portName := fmt.Sprintf("IP_%s", cleanPort)
+		portName := fmt.Sprintf("IP_%s", params.PortOrURI)
 		psScript = fmt.Sprintf(
 			`$port = Get-PrinterPort -Name '%s' -ErrorAction SilentlyContinue; `+
 				`if (-not $port) { Add-PrinterPort -Name '%s' -PrinterHostAddress '%s' -PortNumber 9100 }; `+
 				`Add-Printer -Name '%s' -DriverName '%s' -PortName '%s'`,
-			portName, portName, cleanPort, cleanName, cleanDriver, portName,
+			escapePS(portName), escapePS(portName), escapePS(params.PortOrURI), cleanName, cleanDriver, escapePS(portName),
 		)
 	case PrinterTypeUSB, PrinterTypeBluetooth:
-		psScript = fmt.Sprintf("Add-Printer -Name '%s' -DriverName '%s' -PortName '%s'", cleanName, cleanDriver, cleanPort)
+		psScript = fmt.Sprintf("Add-Printer -Name '%s' -DriverName '%s' -PortName '%s'", cleanName, cleanDriver, escapePS(params.PortOrURI))
 	default:
 		return fmt.Errorf("unsupported printer type: %s", params.Type)
 	}
@@ -456,114 +490,78 @@ func (p *WindowsPrinter) Register(ctx context.Context, params RegisterPrinterPar
 		psScript += fmt.Sprintf(`; (New-Object -ComObject WScript.Network).SetDefaultPrinter('%s')`, cleanName)
 	}
 
-	cmd := exec.CommandContext(ctx, "powershell", "-NoProfile", "-NonInteractive", "-Command", psScript)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("register printer failed: %s (%w)", strings.TrimSpace(string(out)), err)
+	if out, err := runPS(ctx, psScript); err != nil {
+		return fmt.Errorf("register printer failed: %s (%w)", out, err)
 	}
-
+	p.invalidateEnum()
 	return nil
 }
 
 func (p *WindowsPrinter) SetDefault(ctx context.Context, name string) error {
-	cleanName := strings.ReplaceAll(name, "'", "''")
+	cleanName := escapePS(name)
 	psScript := fmt.Sprintf(`(New-Object -ComObject WScript.Network).SetDefaultPrinter('%s')`, cleanName)
-	cmd := exec.CommandContext(ctx, "powershell", "-NoProfile", "-NonInteractive", "-Command", psScript)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("set default printer failed: %s (%w)", strings.TrimSpace(string(out)), err)
+	if out, err := runPS(ctx, psScript); err != nil {
+		return fmt.Errorf("set default printer failed: %s (%w)", out, err)
 	}
 	return nil
 }
 
-func (p *WindowsPrinter) Delete(ctx context.Context, name string) error {
-	cleanName := strings.ReplaceAll(name, "'", "''")
+func (p *WindowsPrinter) Remove(ctx context.Context, name string) error {
+	cleanName := escapePS(name)
 	psScript := fmt.Sprintf(`Remove-Printer -Name '%s' -ErrorAction Stop`, cleanName)
-	cmd := exec.CommandContext(ctx, "powershell", "-NoProfile", "-NonInteractive", "-Command", psScript)
-	out, err := cmd.CombinedOutput()
+	out, err := runPS(ctx, psScript)
 	if err != nil {
 		// Fallback wmic
 		wmic := exec.CommandContext(ctx, "wmic", "printer", "where", fmt.Sprintf(`name="%s"`, cleanName), "delete")
 		if wout, werr := wmic.CombinedOutput(); werr != nil {
-			return fmt.Errorf("remove printer failed: %s / %s (%w)", strings.TrimSpace(string(out)), strings.TrimSpace(string(wout)), err)
+			return fmt.Errorf("remove printer failed: %s / %s (%w)", out, strings.TrimSpace(string(wout)), err)
 		}
+	}
+	p.invalidateEnum()
+	return nil
+}
+
+// Share membagikan printer lokal via SMB (Windows tidak punya IPP server native).
+func (p *WindowsPrinter) Share(ctx context.Context, name string, opts ShareOptions) (PrinterShare, error) {
+	if _, err := p.Info(ctx, name); err != nil {
+		return PrinterShare{}, err
+	}
+	share := strings.TrimSpace(opts.ShareName)
+	if share == "" {
+		share = defaultShareName(name)
+	}
+	ps := fmt.Sprintf("Set-Printer -Name '%s' -Shared $true -ShareName '%s'", escapePS(name), escapePS(share))
+	if out, err := runPS(ctx, ps); err != nil {
+		return PrinterShare{}, fmt.Errorf("share printer failed: %s (%w)", out, err)
+	}
+	host := LocalHostname()
+	return PrinterShare{
+		Name:      name,
+		Protocol:  "smb",
+		ShareName: share,
+		Host:      host,
+		SMBPath:   smbPath(host, share),
+	}, nil
+}
+
+func (p *WindowsPrinter) Unshare(ctx context.Context, name string) error {
+	ps := fmt.Sprintf("Set-Printer -Name '%s' -Shared $false", escapePS(name))
+	if out, err := runPS(ctx, ps); err != nil {
+		return fmt.Errorf("unshare printer failed: %s (%w)", out, err)
 	}
 	return nil
 }
 
 func (p *WindowsPrinter) Options(ctx context.Context) (PrinterOptions, error) {
-	// Jalankan enumerasi driver dan port secara paralel dengan timeout agar responsif
-	type resDrivers struct {
-		drivers []string
+	enum, err := p.enumerateWindows(ctx)
+	if err != nil {
+		return PrinterOptions{Types: SupportedPrinterTypes}, err
 	}
-	type resPorts struct {
-		ports []PrinterPort
-	}
-
-	dCh := make(chan resDrivers, 1)
-	pCh := make(chan resPorts, 1)
-
-	go func() {
-		dCtx, cancel := context.WithTimeout(ctx, 4*time.Second)
-		defer cancel()
-		dCh <- resDrivers{drivers: listWindowsDrivers(dCtx)}
-	}()
-
-	go func() {
-		pCtx, cancel := context.WithTimeout(ctx, 4*time.Second)
-		defer cancel()
-		pCh <- resPorts{ports: listWindowsPorts(pCtx)}
-	}()
-
-	var drivers []string
-	var ports []PrinterPort
-
-	select {
-	case res := <-dCh:
-		drivers = res.drivers
-	case <-time.After(5 * time.Second):
-	}
-
-	select {
-	case res := <-pCh:
-		ports = res.ports
-	case <-time.After(5 * time.Second):
-	}
-
-	// Fallback minimum default jika OS lambat/kosong
-	if len(drivers) == 0 {
-		drivers = []string{
-			"Generic / Text Only",
-			"Microsoft Print to PDF",
-			"EPSON TM-T(203dpi) Receipt6",
-			"EPSON L3210 Series",
-		}
-	}
-	if len(ports) == 0 {
-		ports = []PrinterPort{
-			{Name: "USB001", Description: "Virtual printer port for USB"},
-			{Name: "USB002", Description: "Virtual printer port for USB"},
-			{Name: "COM1:", Description: "Serial Port"},
-			{Name: "COM3:", Description: "Serial Port"},
-		}
-	}
-
 	return PrinterOptions{
 		Types:   SupportedPrinterTypes,
-		Drivers: drivers,
-		Ports:   ports,
+		Drivers: enum.drivers,
+		Ports:   enum.ports,
 	}, nil
-}
-
-func (p *WindowsPrinter) SetDefault(ctx context.Context, name string) error {
-	clean := strings.ReplaceAll(name, "'", "''")
-	ps := fmt.Sprintf("(New-Object -ComObject WScript.Network).SetDefaultPrinter('%s')", clean)
-	out, err := exec.CommandContext(ctx, "powershell", "-NoProfile", "-NonInteractive", "-Command", ps).CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("set default printer failed: %s (%w)", strings.TrimSpace(string(out)), err)
-	}
-	p.invalidateEnum()
-	return nil
 }
 
 func (p *WindowsPrinter) Update(ctx context.Context, name string, params UpdatePrinterParams) error {
@@ -607,16 +605,4 @@ func (p *WindowsPrinter) Update(ctx context.Context, name string, params UpdateP
 	}
 	p.invalidateEnum()
 	return nil
-}
-
-func (p *WindowsPrinter) Options(ctx context.Context) (PrinterOptions, error) {
-	enum, err := p.enumerateWindows(ctx)
-	if err != nil {
-		return PrinterOptions{Types: SupportedPrinterTypes}, err
-	}
-	return PrinterOptions{
-		Types:   SupportedPrinterTypes,
-		Drivers: enum.drivers,
-		Ports:   enum.ports,
-	}, nil
 }

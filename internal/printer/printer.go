@@ -69,6 +69,37 @@ type RegisterPrinterParams struct {
 	Type       PrinterType `json:"type"`
 	PortOrURI  string      `json:"portOrUri"`
 	IsDefault  bool        `json:"isDefault,omitempty"`
+	// PPD opsional (nama model dari `lpinfo -m` atau path file PPD) untuk CUPS.
+	PPD string `json:"ppd,omitempty"`
+	// Driverless memaksa pemakaian IPP Everywhere (`-m everywhere`) di CUPS.
+	Driverless bool `json:"driverless,omitempty"`
+}
+
+// ShareProtocol menentukan cara sebuah printer dibagikan ke komputer lain.
+type ShareProtocol string
+
+const (
+	ShareProtocolAuto ShareProtocol = "auto"
+	ShareProtocolSMB  ShareProtocol = "smb"
+	ShareProtocolIPP  ShareProtocol = "ipp"
+)
+
+// ShareOptions mengatur cara sebuah printer lokal dibagikan.
+type ShareOptions struct {
+	Protocol  ShareProtocol `json:"protocol,omitempty"`
+	ShareName string        `json:"shareName,omitempty"`
+}
+
+// PrinterShare adalah hasil pembagian printer: endpoint yang bisa dipakai
+// komputer lain untuk memasang queue yang menunjuk ke printer ini.
+type PrinterShare struct {
+	Name      string `json:"name"`
+	Protocol  string `json:"protocol"`            // "smb" | "ipp"
+	ShareName string `json:"shareName,omitempty"` // nama share OS
+	Host      string `json:"host,omitempty"`      // hostname atau IP yang dipakai
+	SMBPath   string `json:"smbPath,omitempty"`   // \\host\share
+	IPPURI    string `json:"ippUri,omitempty"`    // ipp://host:631/printers/name
+	SocketURI string `json:"socketUri,omitempty"` // socket://host:port (relay)
 }
 
 // UpdatePrinterParams mendeskripsikan perubahan pada printer yang sudah ada.
@@ -140,6 +171,8 @@ type Printer interface {
 	Remove(ctx context.Context, name string) error
 	SetDefault(ctx context.Context, name string) error
 	Options(ctx context.Context) (PrinterOptions, error)
-	SetDefault(ctx context.Context, name string) error
-	Delete(ctx context.Context, name string) error
+	// Share membagikan printer lokal agar bisa dipasang di komputer lain.
+	Share(ctx context.Context, name string, opts ShareOptions) (PrinterShare, error)
+	// Unshare menghentikan pembagian printer lokal.
+	Unshare(ctx context.Context, name string) error
 }

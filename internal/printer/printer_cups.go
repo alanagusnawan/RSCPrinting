@@ -6,7 +6,9 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -15,6 +17,8 @@ import (
 	"github.com/rscprinting/print-agent/internal/render"
 )
 
+// UnixPrinter mengimplementasikan Printer lewat CUPS (lp/lpadmin/lpstat).
+// Berlaku untuk Linux dan macOS; perbedaan kecil ditangani di file per-OS.
 type UnixPrinter struct {
 	officePath     string
 	convertTimeout time.Duration
@@ -37,6 +41,29 @@ func New(cfg config.Config) (*UnixPrinter, error) {
 		convertTimeout: cfg.Document.ConvertTimeout,
 		allowRaw:       allowRaw,
 	}, nil
+}
+
+// cupBin mencari binary CUPS di PATH lalu di lokasi umum (/usr/sbin dsb).
+func cupBin(name string) string {
+	if path, err := exec.LookPath(name); err == nil {
+		return path
+	}
+	for _, dir := range []string{"/usr/sbin", "/usr/bin", "/usr/local/sbin", "/usr/local/bin"} {
+		p := filepath.Join(dir, name)
+		if _, err := os.Stat(p); err == nil {
+			return p
+		}
+	}
+	return name
+}
+
+func cupCmd(ctx context.Context, name string, args ...string) *exec.Cmd {
+	return exec.CommandContext(ctx, cupBin(name), args...)
+}
+
+func cupRun(ctx context.Context, name string, args ...string) (string, error) {
+	out, err := cupCmd(ctx, name, args...).CombinedOutput()
+	return strings.TrimSpace(string(out)), err
 }
 
 func (p *UnixPrinter) Print(ctx context.Context, job Job) error {
@@ -66,7 +93,7 @@ func (p *UnixPrinter) Print(ctx context.Context, job Job) error {
 }
 
 func (p *UnixPrinter) printRaw(ctx context.Context, printerName string, data []byte) error {
-	cmd := exec.CommandContext(ctx, "lp", "-d", printerName, "-o", "raw")
+	cmd := cupCmd(ctx, "lp", "-d", printerName, "-o", "raw")
 	cmd.Stdin = bytes.NewReader(data)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
@@ -97,7 +124,7 @@ func (p *UnixPrinter) printRendered(ctx context.Context, job Job, filePath strin
 
 	args = append(args, filePath)
 
-	cmd := exec.CommandContext(ctx, "lp", args...)
+	cmd := cupCmd(ctx, "lp", args...)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 
@@ -109,7 +136,7 @@ func (p *UnixPrinter) printRendered(ctx context.Context, job Job, filePath strin
 }
 
 func (p *UnixPrinter) List(ctx context.Context) ([]PrinterInfo, error) {
-	cmd := exec.CommandContext(ctx, "lpstat", "-p", "-d")
+	cmd := cupCmd(ctx, "lpstat", "-p", "-d")
 	out, err := cmd.Output()
 	if err != nil {
 		return nil, fmt.Errorf("lpstat failed: %w", err)
@@ -162,59 +189,43 @@ func (p *UnixPrinter) Info(ctx context.Context, name string) (PrinterInfo, error
 	return PrinterInfo{}, ErrPrinterNotFound
 }
 
+// Register memasang queue CUPS. Idempotent: bila queue sudah ada, konfigurasi
+// diperbarui (lpadmin -p ... -v ... -E).
 func (p *UnixPrinter) Register(ctx context.Context, params RegisterPrinterParams) error {
-	var uri string
-	switch params.Type {
-	case PrinterTypeHTTPShared:
-		uri = params.PortOrURI
-		if strings.HasPrefix(strings.ToLower(uri), "http://") {
-			uri = "ipp://" + uri[7:]
-		}
-	case PrinterTypeIP:
-		uri = fmt.Sprintf("socket://%s:9100", params.PortOrURI)
-	default:
-		uri = params.PortOrURI
+	if params.Name == "" {
+		return fmt.Errorf("printer name required")
+	}
+	uri := unixDeviceURI(params)
+	if uri == "" {
+		return fmt.Errorf("portOrUri required")
 	}
 
 	args := []string{"-p", params.Name, "-v", uri, "-E"}
-	cmd := exec.CommandContext(ctx, "lpadmin", args...)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("lpadmin failed: %s (%w)", strings.TrimSpace(string(out)), err)
+	args = append(args, cupsModelArgs(params)...)
+
+	if out, err := cupRun(ctx, "lpadmin", args...); err != nil {
+		return fmt.Errorf("lpadmin failed: %s (%w)", out, err)
 	}
+
+	// Aktifkan & terima job agar printer siap dipakai.
+	_, _ = cupRun(ctx, "cupsenable", params.Name)
+	_, _ = cupRun(ctx, "cupsaccept", params.Name)
 
 	if params.IsDefault {
-		defCmd := exec.CommandContext(ctx, "lpadmin", "-d", params.Name)
-		_ = defCmd.Run()
-	}
-	return nil
-}
-
-func (p *UnixPrinter) Remove(ctx context.Context, name string) error {
-	cmd := exec.CommandContext(ctx, "lpadmin", "-x", name)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("lpadmin -x failed: %s (%w)", strings.TrimSpace(string(out)), err)
-	}
-	return nil
-}
-
-func (p *UnixPrinter) SetDefault(ctx context.Context, name string) error {
-	cmd := exec.CommandContext(ctx, "lpadmin", "-d", name)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("lpadmin -d failed: %s (%w)", strings.TrimSpace(string(out)), err)
+		_ = p.SetDefault(ctx, params.Name)
 	}
 	return nil
 }
 
 func (p *UnixPrinter) Update(ctx context.Context, name string, params UpdatePrinterParams) error {
 	if params.PortOrURI != "" {
-		uri := params.PortOrURI
-		if params.Type == PrinterTypeIP {
-			uri = fmt.Sprintf("socket://%s:9100", params.PortOrURI)
+		uri := unixDeviceURI(RegisterPrinterParams{Type: params.Type, PortOrURI: params.PortOrURI})
+		args := []string{"-p", name, "-v", uri, "-E"}
+		if out, err := cupRun(ctx, "lpadmin", args...); err != nil {
+			return fmt.Errorf("lpadmin -v failed: %s (%w)", out, err)
 		}
-		cmd := exec.CommandContext(ctx, "lpadmin", "-p", name, "-v", uri, "-E")
-		if out, err := cmd.CombinedOutput(); err != nil {
-			return fmt.Errorf("lpadmin -v failed: %s (%w)", strings.TrimSpace(string(out)), err)
-		}
+		_, _ = cupRun(ctx, "cupsenable", name)
+		_, _ = cupRun(ctx, "cupsaccept", name)
 	}
 
 	if params.NewName != "" {
@@ -242,6 +253,48 @@ func (p *UnixPrinter) Update(ctx context.Context, name string, params UpdatePrin
 	return nil
 }
 
+func (p *UnixPrinter) Remove(ctx context.Context, name string) error {
+	if out, err := cupRun(ctx, "lpadmin", "-x", name); err != nil {
+		return fmt.Errorf("delete printer failed: %s (%w)", out, err)
+	}
+	return nil
+}
+
+// Share mengaktifkan berbagi CUPS untuk printer dan mengembalikan endpoint
+// (IPP + SMB) yang bisa dipasang di komputer lain.
+func (p *UnixPrinter) Share(ctx context.Context, name string, opts ShareOptions) (PrinterShare, error) {
+	if _, err := p.Info(ctx, name); err != nil {
+		return PrinterShare{}, err
+	}
+
+	_, _ = cupRun(ctx, "cupsctl", "--share-printers")
+	if out, err := cupRun(ctx, "lpadmin", "-p", name, "-o", "printer-is-shared=true", "-E"); err != nil {
+		return PrinterShare{}, fmt.Errorf("share printer failed: %s (%w)", out, err)
+	}
+
+	share := strings.TrimSpace(opts.ShareName)
+	if share == "" {
+		share = defaultShareName(name)
+	}
+	host := platformShareHost()
+
+	return PrinterShare{
+		Name:      name,
+		Protocol:  "ipp",
+		ShareName: share,
+		Host:      host,
+		SMBPath:   smbPath(host, share),
+		IPPURI:    ippURI(host, 631, name),
+	}, nil
+}
+
+func (p *UnixPrinter) Unshare(ctx context.Context, name string) error {
+	if out, err := cupRun(ctx, "lpadmin", "-p", name, "-o", "printer-is-shared=false"); err != nil {
+		return fmt.Errorf("unshare printer failed: %s (%w)", out, err)
+	}
+	return nil
+}
+
 func (p *UnixPrinter) Options(ctx context.Context) (PrinterOptions, error) {
 	return PrinterOptions{
 		Types:   SupportedPrinterTypes,
@@ -250,24 +303,8 @@ func (p *UnixPrinter) Options(ctx context.Context) (PrinterOptions, error) {
 	}, nil
 }
 
-func (p *UnixPrinter) SetDefault(ctx context.Context, name string) error {
-	cmd := exec.CommandContext(ctx, "lpoptions", "-d", name)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("set default printer failed: %s (%w)", strings.TrimSpace(string(out)), err)
-	}
-	return nil
-}
-
-func (p *UnixPrinter) Delete(ctx context.Context, name string) error {
-	cmd := exec.CommandContext(ctx, "lpadmin", "-x", name)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("delete printer failed: %s (%w)", strings.TrimSpace(string(out)), err)
-	}
-	return nil
-}
-
 func listUnixDrivers(ctx context.Context) []string {
-	out, err := exec.CommandContext(ctx, "lpinfo", "-m").Output()
+	out, err := cupCmd(ctx, "lpinfo", "-m").Output()
 	if err != nil {
 		return nil
 	}
@@ -288,7 +325,7 @@ func listUnixDrivers(ctx context.Context) []string {
 }
 
 func listUnixPorts(ctx context.Context) []PrinterPort {
-	out, err := exec.CommandContext(ctx, "lpinfo", "-v").Output()
+	out, err := cupCmd(ctx, "lpinfo", "-v").Output()
 	if err != nil {
 		return nil
 	}

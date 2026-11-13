@@ -18,6 +18,12 @@ printers:
   allowlist:
     - Thermal
   pollInterval: 5m # deteksi perubahan daftar printer
+  share:
+    enabled: true
+    protocol: auto
+    namePattern: "RSC-%s"
+    relayEnabled: false
+    relayPort: 19100
   thermal:
     - name: "Thermal" # queue ESC/POS; dirender ke raster, melewati driver OS
       widthMm: 80 # 58 | 80

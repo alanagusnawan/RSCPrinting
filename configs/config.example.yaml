@@ -32,6 +32,14 @@ printers:
   #     trim: true         # pangkas margin putih (default true)
   #     feed: 100          # feed (dot) sebelum cut (default 100 ≈ 18.75mm)
 
+  # Berbagi printer lintas-komputer (komputer B mencetak lewat printer komputer A).
+  share:
+    enabled: true          # auto-share printer di allowlist saat agent start
+    protocol: auto         # auto | smb | ipp
+    namePattern: "RSC-%s"  # pola nama share OS
+    relayEnabled: false    # Model 2: buka listener IPP agar cross-OS driverless
+    relayPort: 19100       # port listener relay IPP
+
 ghostscript:
   path: ""  # kosong = auto-detect (Windows)
 

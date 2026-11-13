@@ -175,9 +175,23 @@ func (s *Server) handlePrintersSubtree(w http.ResponseWriter, r *http.Request) {
 		s.handlePrinterOptions(w, r)
 		return
 	}
+	if rest == "sync" {
+		s.handleSyncPrinters(w, r)
+		return
+	}
 	if strings.HasSuffix(rest, "/default") {
 		name, _ := url.PathUnescape(strings.Trim(strings.TrimSuffix(rest, "/default"), "/"))
 		s.handleSetDefaultPrinter(w, r, name)
+		return
+	}
+	if strings.HasSuffix(rest, "/share") {
+		name, _ := url.PathUnescape(strings.Trim(strings.TrimSuffix(rest, "/share"), "/"))
+		s.handleSharePrinter(w, r, name)
+		return
+	}
+	if strings.HasSuffix(rest, "/unshare") {
+		name, _ := url.PathUnescape(strings.Trim(strings.TrimSuffix(rest, "/unshare"), "/"))
+		s.handleUnsharePrinter(w, r, name)
 		return
 	}
 	name, _ := url.PathUnescape(rest)
@@ -293,6 +307,118 @@ func (s *Server) handleSetDefaultPrinter(w http.ResponseWriter, r *http.Request,
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{"success": true, "default": name})
+}
+
+// handleSharePrinter membagikan printer lokal agar bisa dipasang di device lain.
+func (s *Server) handleSharePrinter(w http.ResponseWriter, r *http.Request, name string) {
+	if r.Method != http.MethodPost && r.Method != http.MethodPut {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !s.allowMutations(w) {
+		return
+	}
+	if name == "" {
+		http.Error(w, "printer name required", http.StatusBadRequest)
+		return
+	}
+	var opts printer.ShareOptions
+	_ = json.NewDecoder(r.Body).Decode(&opts) // body opsional
+
+	share, err := s.printer.Share(r.Context(), name, opts)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]interface{}{"success": false, "error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{"success": true, "share": share})
+}
+
+// handleUnsharePrinter menghentikan pembagian printer lokal.
+func (s *Server) handleUnsharePrinter(w http.ResponseWriter, r *http.Request, name string) {
+	if r.Method != http.MethodPost && r.Method != http.MethodPut && r.Method != http.MethodDelete {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !s.allowMutations(w) {
+		return
+	}
+	if name == "" {
+		http.Error(w, "printer name required", http.StatusBadRequest)
+		return
+	}
+	if err := s.printer.Unshare(r.Context(), name); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]interface{}{"success": false, "error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{"success": true, "printer": name})
+}
+
+// handleSyncPrinters memasang beberapa printer sekaligus (bulk) pada device ini.
+func (s *Server) handleSyncPrinters(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !s.allowMutations(w) {
+		return
+	}
+	var body struct {
+		Printers []printer.RegisterPrinterParams `json:"printers"`
+		Prune    bool                            `json:"prune"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, fmt.Sprintf("invalid request body: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	current, _ := s.printer.List(r.Context())
+	have := make(map[string]bool, len(current))
+	for _, p := range current {
+		have[p.Name] = true
+	}
+
+	installed := []string{}
+	updated := []string{}
+	removed := []string{}
+	failed := map[string]string{}
+
+	for _, params := range body.Printers {
+		if err := s.printer.Register(r.Context(), params); err != nil {
+			failed[params.Name] = err.Error()
+			continue
+		}
+		if have[params.Name] {
+			updated = append(updated, params.Name)
+		} else {
+			installed = append(installed, params.Name)
+		}
+	}
+
+	if body.Prune {
+		want := make(map[string]bool, len(body.Printers))
+		for _, params := range body.Printers {
+			want[params.Name] = true
+		}
+		for _, p := range current {
+			if want[p.Name] {
+				continue
+			}
+			if err := s.printer.Remove(r.Context(), p.Name); err != nil {
+				failed[p.Name] = err.Error()
+			} else {
+				removed = append(removed, p.Name)
+			}
+		}
+	}
+
+	s.notifyPrintersUpdate(r.Context())
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"success":   len(failed) == 0,
+		"installed": installed,
+		"updated":   updated,
+		"removed":   removed,
+		"failed":    failed,
+	})
 }
 
 // ---------------------------------------------------------------------------
