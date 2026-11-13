@@ -1,5 +1,6 @@
 goals/
 PROMPT_BACKEND_NODEJS.md
 dist/*.msi
+dist/print-agent-*
 data/
 logs/

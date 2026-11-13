@@ -3,6 +3,7 @@ module github.com/rscprinting/print-agent
 go 1.20
 
 require (
+	github.com/Masterminds/semver/v3 v3.2.1
 	github.com/creativeprojects/go-selfupdate v1.1.3
 	github.com/getlantern/systray v1.2.2
 	github.com/gobwas/ws v1.2.1
@@ -18,7 +19,6 @@ require (
 
 require (
 	code.gitea.io/sdk/gitea v0.17.1 // indirect
-	github.com/Masterminds/semver/v3 v3.2.1 // indirect
 	github.com/alessio/shellescape v1.4.1 // indirect
 	github.com/danieljoos/wincred v1.2.0 // indirect
 	github.com/davidmz/go-pageant v1.0.2 // indirect

@@ -503,3 +503,38 @@ Hasil kompilasi ada di `dist/`. Contoh build Windows manual dengan version info:
 go build -ldflags "-s -w -X github.com/rscprinting/print-agent/internal/version.Version=1.0.0" `
   -o dist/print-agent-windows-amd64.exe ./cmd/print-agent
 ```
+
+> Binary `dist/print-agent-*` **tidak lagi dilacak git**; ia dihasilkan dari rilis GitHub
+> (lihat bagian Rilis & Auto-update).
+
+---
+
+## Rilis & Auto-update
+
+Rilis dibuat **otomatis** saat push ke `main` via `.github/workflows/release.yml`:
+
+1. Menghitung **versi** dari tag terakhir (semver `vX.Y.Z`) memakai **conventional commits**:
+   - `feat:` → minor, `fix:`/lainnya → patch, `BREAKING CHANGE`/`!:` → major.
+   - Versi awal `v0.1.0`. Tambahkan `[skip release]` di pesan commit untuk melewati rilis.
+2. Build 6 binary (Windows amd64/386, Linux amd64/arm64, macOS amd64/arm64).
+3. Membuat `checksums.txt` (SHA256) — **wajib** ada agar auto-update lolos verifikasi.
+4. Membuat GitHub Release (tag + notes + asset).
+
+**Penting:** gunakan awalan conventional commit (`feat:`, `fix:`, `feat!:`, …) agar bump versi benar.
+
+### Auto-update di agent
+Agent membandingkan versinya dengan rilis terbaru (semver) dan mengunduh binary yang cocok
+via `go-selfupdate`, dengan verifikasi `checksums.txt`.
+
+- Repo **privat** → set token agar agent bisa mengunduh asset:
+  - config `updater.token`, atau environment `PRINT_AGENT_GH_TOKEN`, atau OS keyring
+    (`print-agent` / `github-token`).
+- Repo publik → token opsional (hanya untuk menghindari rate limit).
+- Cek/terapkan manual: `print-agent update` (cek) dan `print-agent update --apply`.
+
+### Rilis manual (lokal)
+```bash
+./scripts/release.sh            # versi = patch+1 dari tag terakhir
+./scripts/release.sh v1.2.3     # versi eksplisit
+```
+Butuh GitHub CLI (`gh`) yang sudah login.

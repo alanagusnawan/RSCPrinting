@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Masterminds/semver/v3"
 	"github.com/creativeprojects/go-selfupdate"
 	"github.com/rscprinting/print-agent/internal/config"
 	"github.com/rscprinting/print-agent/internal/logger"
@@ -88,7 +89,13 @@ func (u *Updater) CheckAndApply(ctx context.Context) (bool, string, error) {
 		return false, "", nil
 	}
 
-	if !latest.GreaterThan(version.Version) {
+	// latest.GreaterThan memakai semver.MustParse yang akan panic bila
+	// version.Version bukan semver (mis. build dev dengan hash commit).
+	// Untuk kasus itu, anggap versi lokal lebih lama sehingga update tetap jalan.
+	if !isSemver(version.Version) {
+		slog.Info("local version is not semver; proceeding with update",
+			"localVersion", version.Version, "latest", latest.Version())
+	} else if !latest.GreaterThan(version.Version) {
 		slog.Info("agent binary is already up-to-date", "version", version.Version)
 		return false, latest.Version(), nil
 	}
@@ -169,6 +176,16 @@ func (u *Updater) StartPeriodicCheck(ctx context.Context, onUpdated func(newVer 
 			}
 		}
 	}()
+}
+
+// isSemver melaporkan apakah v dapat di-parse sebagai versi semver.
+func isSemver(v string) bool {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return false
+	}
+	_, err := semver.NewVersion(v)
+	return err == nil
 }
 
 func VerifySHA256(filePath, expectedHash string) error {
