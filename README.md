@@ -511,16 +511,41 @@ go build -ldflags "-s -w -X github.com/rscprinting/print-agent/internal/version.
 
 ## Rilis & Auto-update
 
-Rilis dibuat **otomatis** saat push ke `main` via `.github/workflows/release.yml`:
+Rilis dilakukan **dari komputer lokal** (tanpa GitHub Actions) memakai script. Script akan:
 
 1. Menghitung **versi** dari tag terakhir (semver `vX.Y.Z`) memakai **conventional commits**:
    - `feat:` → minor, `fix:`/lainnya → patch, `BREAKING CHANGE`/`!:` → major.
-   - Versi awal `v0.1.0`. Tambahkan `[skip release]` di pesan commit untuk melewati rilis.
+   - Belum ada tag → `v0.1.0`.
 2. Build 6 binary (Windows amd64/386, Linux amd64/arm64, macOS amd64/arm64).
-3. Membuat `checksums.txt` (SHA256) — **wajib** ada agar auto-update lolos verifikasi.
-4. Membuat GitHub Release (tag + notes + asset).
+3. Membuat `dist/checksums.txt` (SHA256, format dua spasi) — **wajib** agar auto-update lolos verifikasi.
+4. Membuat git tag, push tag, lalu **membuat GitHub Release + upload asset** via REST API.
 
 **Penting:** gunakan awalan conventional commit (`feat:`, `fix:`, `feat!:`, …) agar bump versi benar.
+
+### Rilis di Windows (PowerShell)
+Butuh **Go**, **Git**, dan **PAT GitHub** (fine-grained: *Contents: Read & Write*; klasik: scope `repo`).
+Set token di environment, lalu jalankan:
+```powershell
+$env:GH_TOKEN = "ghp_xxx"
+powershell -ExecutionPolicy Bypass -File .\scripts\release.ps1
+
+# override bump / versi
+powershell -ExecutionPolicy Bypass -File .\scripts\release.ps1 -Bump minor
+powershell -ExecutionPolicy Bypass -File .\scripts\release.ps1 -Version v1.0.0
+
+# uji tanpa tag/push/release (build + checksums saja)
+powershell -ExecutionPolicy Bypass -File .\scripts\release.ps1 -DryRun
+```
+Opsi lain: `-Repo owner/name`, `-Token`, `-RunTests`, `-SkipBuild`, `-SkipPush`.
+
+### Rilis di Git Bash / macOS / Linux
+```bash
+export GH_TOKEN=ghp_xxx
+scripts/release.sh --dry-run     # build + checksums saja
+scripts/release.sh               # versi otomatis
+scripts/release.sh v1.2.3        # versi eksplisit
+scripts/release.sh --bump minor  # paksa minor
+```
 
 ### Auto-update di agent
 Agent membandingkan versinya dengan rilis terbaru (semver) dan mengunduh binary yang cocok
@@ -531,10 +556,3 @@ via `go-selfupdate`, dengan verifikasi `checksums.txt`.
     (`print-agent` / `github-token`).
 - Repo publik → token opsional (hanya untuk menghindari rate limit).
 - Cek/terapkan manual: `print-agent update` (cek) dan `print-agent update --apply`.
-
-### Rilis manual (lokal)
-```bash
-./scripts/release.sh            # versi = patch+1 dari tag terakhir
-./scripts/release.sh v1.2.3     # versi eksplisit
-```
-Butuh GitHub CLI (`gh`) yang sudah login.

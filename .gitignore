@@ -2,5 +2,6 @@ goals/
 PROMPT_BACKEND_NODEJS.md
 dist/*.msi
 dist/print-agent-*
+dist/checksums.txt
 data/
 logs/
