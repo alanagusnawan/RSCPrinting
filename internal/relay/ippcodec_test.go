@@ -46,6 +46,9 @@ func TestParseIPPPrintJob(t *testing.T) {
 	if got := printerNameFromURI(req.PrinterURI); got != "Thermal" {
 		t.Errorf("printerNameFromURI = %q", got)
 	}
+	if got := printerNameFromURI("ipp://host:19100/printers/EPSON%20TM-T82X%20Receipt6"); got != "EPSON TM-T82X Receipt6" {
+		t.Errorf("printerNameFromURI unescape = %q, want %q", got, "EPSON TM-T82X Receipt6")
+	}
 }
 
 func TestParseIPPTooShort(t *testing.T) {

@@ -2,11 +2,54 @@ package printer
 
 import (
 	"fmt"
+	"net"
 	"net/url"
 	"strings"
+	"time"
 )
 
-// sanitizeCUPSURI memastikan path URL di-percent-encode agar valid di CUPS/lpadmin.
+// resolveResolvableHost mencoba mengecek apakah host bisa di-resolve.
+// Bila host tanpa domain gagal (khas Windows NetBIOS di macOS/Linux),
+// dicoba fallback ke host + ".local" (mDNS).
+func resolveResolvableHost(hostPort string) string {
+	host, port, err := net.SplitHostPort(hostPort)
+	if err != nil {
+		host = hostPort
+		port = ""
+	}
+
+	// Jangan ubah jika sudah berupa IP atau sudah berakhiran .local
+	if net.ParseIP(host) != nil || strings.HasSuffix(strings.ToLower(host), ".local") {
+		return hostPort
+	}
+
+	// Jangan lookup bila host adalah dummy/test (misal single letter)
+	if len(host) <= 1 {
+		return hostPort
+	}
+
+	checkHost := func(h string) bool {
+		addrs, lerr := net.LookupHost(h)
+		return lerr == nil && len(addrs) > 0
+	}
+
+	if checkHost(host) {
+		return hostPort
+	}
+
+	// Coba mDNS (.local)
+	localCandidate := host + ".local"
+	if checkHost(localCandidate) {
+		if port != "" {
+			return net.JoinHostPort(localCandidate, port)
+		}
+		return localCandidate
+	}
+
+	return hostPort
+}
+
+// sanitizeCUPSURI memastikan host bisa di-resolve dan path URL di-percent-encode agar valid di CUPS/lpadmin.
 func sanitizeCUPSURI(rawURI string) string {
 	parts := strings.SplitN(rawURI, "://", 2)
 	if len(parts) != 2 {
@@ -16,7 +59,7 @@ func sanitizeCUPSURI(rawURI string) string {
 
 	// Pisahkan host[:port] dan path
 	hostPath := strings.SplitN(rest, "/", 2)
-	host := hostPath[0]
+	host := resolveResolvableHost(hostPath[0])
 	if len(hostPath) == 1 {
 		return scheme + "://" + host
 	}
@@ -77,6 +120,37 @@ func unixDeviceURI(params RegisterPrinterParams) string {
 	}
 }
 
+// isHostPortConnectable menguji apakah endpoint remote IPP aktif (timeout cepat 1.5s).
+func isHostPortConnectable(rawURI string) bool {
+	parts := strings.SplitN(rawURI, "://", 2)
+	if len(parts) != 2 {
+		return false
+	}
+	hostPort := strings.SplitN(parts[1], "/", 2)[0]
+	if !strings.Contains(hostPort, ":") {
+		hostPort = net.JoinHostPort(hostPort, "631")
+	}
+	conn, err := net.DialTimeout("tcp", hostPort, 1500*time.Millisecond)
+	if err != nil {
+		return false
+	}
+	_ = conn.Close()
+	return true
+}
+
+// cupsFallbackPPD mencari model PPD CUPS yang sesuai dengan nama printer atau fallback ke generic.ppd.
+func cupsFallbackPPD(name string) string {
+	n := strings.ToLower(name)
+	switch {
+	case strings.Contains(n, "tm-t82") || strings.Contains(n, "t82"):
+		return "Library/Printers/PPDs/Contents/Resources/EPSON TM-T82-SA.gz"
+	case strings.Contains(n, "epson"):
+		return "drv:///sample.drv/epson24.ppd"
+	default:
+		return "drv:///sample.drv/generic.ppd"
+	}
+}
+
 // cupsModelArgs menentukan argumen `-m` untuk lpadmin berdasarkan PPD/driver
 // yang diberikan, atau driverless untuk URI IPP, atau raw untuk socket.
 func cupsModelArgs(params RegisterPrinterParams) []string {
@@ -86,12 +160,18 @@ func cupsModelArgs(params RegisterPrinterParams) []string {
 	if params.DriverName != "" && !isGenericDriverName(params.DriverName) {
 		return []string{"-m", params.DriverName}
 	}
-	if params.Driverless {
-		return []string{"-m", "everywhere"}
-	}
 	uri := unixDeviceURI(params)
 	if strings.HasPrefix(uri, "ipp://") || strings.HasPrefix(uri, "ipps://") {
-		return []string{"-m", "everywhere"}
+		// Jika remote host responsif (probe cepat 1.5s), pakai driverless everywhere
+		if isHostPortConnectable(uri) {
+			return []string{"-m", "everywhere"}
+		}
+		// Di macOS, lpadmin tanpa flag -m atau dengan -m raw akan ditolak/tidak terdaftar di Pengaturan.
+		// Gunakan PPD fallback agar queue resmi terpasang di CUPS & System Settings.
+		if ppd := cupsFallbackPPD(params.Name); ppd != "" {
+			return []string{"-m", ppd}
+		}
+		return []string{"-m", "drv:///sample.drv/generic.ppd"}
 	}
 	return []string{"-m", "raw"}
 }

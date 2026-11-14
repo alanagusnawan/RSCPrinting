@@ -7,7 +7,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log/slog"
 	"net"
 	"os"
 	"os/exec"
@@ -19,6 +18,7 @@ import (
 
 	"github.com/rscprinting/print-agent/internal/config"
 	"github.com/rscprinting/print-agent/internal/render"
+	"golang.org/x/exp/slog"
 )
 
 type WindowsPrinter struct {
@@ -65,16 +65,14 @@ type windowsEnumeration struct {
 
 const (
 	// windowsEnumTimeout membatasi lama enumerasi agar agent tetap membalas
-	// permintaan server tepat waktu walau WMI/PowerShell lambat.
-	windowsEnumTimeout = 4 * time.Second
+	// permintaan server tepat waktu walau WMI/PowerShell lambat di Windows 7.
+	windowsEnumTimeout = 8 * time.Second
 	// windowsEnumTTL menyegarkan cache enumerasi.
 	windowsEnumTTL = 5 * time.Second
 )
 
 // windowsEnumScript mengumpulkan drivers, ports, dan printers dalam SATU proses
-// PowerShell. Tujuannya menghindari beberapa cold-start PowerShell berurutan
-// (termasuk auto-load modul PrintManagement) yang membuat server timeout.
-// Fallback WMI dijalankan di dalam proses yang sama, bukan proses terpisah.
+// PowerShell. Kompatibel dengan PowerShell 2.0 (Windows 7 SP1) hingga PowerShell 5.1+ (Windows 10/11).
 const windowsEnumScript = `$ErrorActionPreference='SilentlyContinue'
 Import-Module PrintManagement -ErrorAction SilentlyContinue
 $wmiPrinters = @(Get-WmiObject Win32_Printer)
@@ -90,7 +88,28 @@ if ($drivers.Count -eq 0) { $drivers = @(Get-WmiObject Win32_PrinterDriver | For
 if ($ports.Count -eq 0) { $ports = @(Get-WmiObject Win32_TCPIPPrinterPort | Select-Object -ExpandProperty Name) }
 if ($names.Count -eq 0) { $names = @($wmiPrinters | Select-Object -ExpandProperty Name) }
 $printers = @($names | Where-Object { $_ } | ForEach-Object { [pscustomobject]@{ name = $_; default = ($_ -eq $defaultName) } })
-[pscustomobject]@{ drivers = @($drivers); ports = @($ports); printers = @($printers) } | ConvertTo-Json -Depth 5 -Compress`
+$obj = [pscustomobject]@{ drivers = @($drivers); ports = @($ports); printers = @($printers) }
+if (Get-Command ConvertTo-Json -ErrorAction SilentlyContinue) {
+    $obj | ConvertTo-Json -Depth 5 -Compress
+} else {
+    try {
+        Add-Type -AssemblyName System.Web.Extensions -ErrorAction SilentlyContinue
+        $ser = New-Object System.Web.Script.Serialization.JavaScriptSerializer
+        $ser.Serialize($obj)
+    } catch {
+        # Fallback manual JSON string untuk PowerShell 2.0 tanpa .NET Web Extensions
+        $dJson = ($drivers | ForEach-Object { '"' + ($_ -replace '\\','\\\\' -replace '"','\"') + '"' }) -join ','
+        $pJson = ($ports | ForEach-Object { '"' + ($_ -replace '\\','\\\\' -replace '"','\"') + '"' }) -join ','
+        $prList = @()
+        foreach ($p in $printers) {
+            $nEsc = $p.name -replace '\\','\\\\' -replace '"','\"'
+            $dVal = if ($p.default) { 'true' } else { 'false' }
+            $prList += '{"name":"' + $nEsc + '","default":' + $dVal + '}'
+        }
+        $prJson = $prList -join ','
+        '{"drivers":[' + $dJson + '],"ports":[' + $pJson + '],"printers":[' + $prJson + ']}'
+    }
+}`
 
 type enumJSON struct {
 	Drivers  json.RawMessage `json:"drivers"`
@@ -158,11 +177,26 @@ func (p *WindowsPrinter) enumerateWindows(ctx context.Context) (*windowsEnumerat
 
 	out, err := exec.CommandContext(runCtx, "powershell", "-NoProfile", "-NonInteractive", "-Command", windowsEnumScript).Output()
 	if err != nil {
+		// Fallback WMI via wmic jika PowerShell gagal / timeout (terutama di Windows 7 SP1)
+		if wmicEnum := p.enumerateWmic(ctx); wmicEnum != nil {
+			p.enumMu.Lock()
+			p.enumCache = wmicEnum
+			p.enumAt = time.Now()
+			p.enumMu.Unlock()
+			return wmicEnum, nil
+		}
 		return p.staleEnum(fmt.Errorf("enumerate printers failed: %w", err))
 	}
 
 	var raw enumJSON
 	if uerr := json.Unmarshal(bytes.TrimSpace(out), &raw); uerr != nil {
+		if wmicEnum := p.enumerateWmic(ctx); wmicEnum != nil {
+			p.enumMu.Lock()
+			p.enumCache = wmicEnum
+			p.enumAt = time.Now()
+			p.enumMu.Unlock()
+			return wmicEnum, nil
+		}
 		return p.staleEnum(fmt.Errorf("parse printer enumeration failed: %w", uerr))
 	}
 
@@ -183,6 +217,44 @@ func (p *WindowsPrinter) enumerateWindows(ctx context.Context) (*windowsEnumerat
 	p.enumAt = time.Now()
 	p.enumMu.Unlock()
 	return enum, nil
+}
+
+// enumerateWmic adalah fallback instan dan ringan via wmic jika PowerShell gagal.
+func (p *WindowsPrinter) enumerateWmic(ctx context.Context) *windowsEnumeration {
+	wctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(wctx, "wmic", "printer", "get", "name,default", "/format:csv")
+	out, err := cmd.Output()
+	if err != nil {
+		return nil
+	}
+
+	lines := strings.Split(string(out), "\n")
+	var printers []PrinterInfo
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(strings.ToLower(line), "node") {
+			continue
+		}
+		parts := strings.Split(line, ",")
+		if len(parts) >= 3 {
+			// format csv wmic: Node,Default,Name
+			isDef := strings.EqualFold(strings.TrimSpace(parts[1]), "true")
+			name := strings.TrimSpace(parts[2])
+			if name != "" {
+				printers = append(printers, PrinterInfo{
+					Name:      name,
+					IsDefault: isDef,
+					Status:    "ready",
+				})
+			}
+		}
+	}
+	if len(printers) == 0 {
+		return nil
+	}
+	return &windowsEnumeration{printers: printers}
 }
 
 // staleEnum mengembalikan cache lama bila ada agar permintaan server tetap

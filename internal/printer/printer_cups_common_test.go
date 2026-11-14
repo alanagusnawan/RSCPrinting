@@ -9,7 +9,7 @@ func TestUnixDeviceURI(t *testing.T) {
 		want string
 	}{
 		{"http->ipp", RegisterPrinterParams{Type: PrinterTypeHTTPShared, PortOrURI: "http://a:631/printers/x"}, "ipp://a:631/printers/x"},
-		{"http->ipp with space", RegisterPrinterParams{Type: PrinterTypeHTTPShared, PortOrURI: "http://DESKTOP-T0CGKSE:19100/printers/EPSON TM-T82X Receipt6"}, "ipp://DESKTOP-T0CGKSE:19100/printers/EPSON%20TM-T82X%20Receipt6"},
+		{"http->ipp with space", RegisterPrinterParams{Type: PrinterTypeHTTPShared, PortOrURI: "http://DESKTOP-T0CGKSE:19100/printers/EPSON TM-T82X Receipt6"}, "ipp://DESKTOP-T0CGKSE.local:19100/printers/EPSON%20TM-T82X%20Receipt6"},
 		{"https->ipps", RegisterPrinterParams{Type: PrinterTypeHTTPShared, PortOrURI: "https://a/printers/x"}, "ipps://a/printers/x"},
 		{"unc->smb", RegisterPrinterParams{Type: PrinterTypeHTTPShared, PortOrURI: `\\host\RSC-x`}, "smb://host/RSC-x"},
 		{"ipp stays", RegisterPrinterParams{Type: PrinterTypeHTTPShared, PortOrURI: "ipp://a/printers/x"}, "ipp://a/printers/x"},
@@ -29,18 +29,23 @@ func TestCupsModelArgs(t *testing.T) {
 	cases := []struct {
 		name string
 		p    RegisterPrinterParams
-		want string
+		want []string
 	}{
-		{"ppd", RegisterPrinterParams{PPD: "drv.ppd", Type: PrinterTypeIP, PortOrURI: "1.2.3.4"}, "drv.ppd"},
-		{"driverless flag", RegisterPrinterParams{Driverless: true}, "everywhere"},
-		{"ipp auto", RegisterPrinterParams{Type: PrinterTypeHTTPShared, PortOrURI: "http://a/printers/x"}, "everywhere"},
-		{"generic ignored -> raw", RegisterPrinterParams{DriverName: "Generic / Text Only", Type: PrinterTypeIP, PortOrURI: "1.2.3.4"}, "raw"},
-		{"custom driver", RegisterPrinterParams{DriverName: "my.ppd", Type: PrinterTypeIP, PortOrURI: "1.2.3.4"}, "my.ppd"},
+		{"ppd", RegisterPrinterParams{PPD: "drv.ppd", Type: PrinterTypeIP, PortOrURI: "1.2.3.4"}, []string{"-m", "drv.ppd"}},
+		{"ipp unconnectable -> fallback", RegisterPrinterParams{Name: "EPSON TM-T82X", Type: PrinterTypeHTTPShared, PortOrURI: "http://127.0.0.1:54321/printers/x"}, []string{"-m", "Library/Printers/PPDs/Contents/Resources/EPSON TM-T82-SA.gz"}},
+		{"generic ignored -> raw", RegisterPrinterParams{DriverName: "Generic / Text Only", Type: PrinterTypeIP, PortOrURI: "1.2.3.4"}, []string{"-m", "raw"}},
+		{"custom driver", RegisterPrinterParams{DriverName: "my.ppd", Type: PrinterTypeIP, PortOrURI: "1.2.3.4"}, []string{"-m", "my.ppd"}},
 	}
 	for _, c := range cases {
 		args := cupsModelArgs(c.p)
-		if len(args) != 2 || args[0] != "-m" || args[1] != c.want {
-			t.Errorf("%s: cupsModelArgs = %v, want [-m %s]", c.name, args, c.want)
+		if len(args) != len(c.want) {
+			t.Errorf("%s: cupsModelArgs = %v, want %v", c.name, args, c.want)
+			continue
+		}
+		for i := range args {
+			if args[i] != c.want[i] {
+				t.Errorf("%s: cupsModelArgs[%d] = %s, want %s", c.name, i, args[i], c.want[i])
+			}
 		}
 	}
 }

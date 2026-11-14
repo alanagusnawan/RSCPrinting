@@ -47,7 +47,7 @@ const (
 const controlTimeout = 5 * time.Second
 
 // printerOpTimeout membatasi operasi pasang/ubah/hapus/share printer OS.
-const printerOpTimeout = 20 * time.Second
+const printerOpTimeout = 30 * time.Second
 
 type Client struct {
 	cfg          config.Config
@@ -710,6 +710,7 @@ func (c *Client) notifyPrintersUpdate(ctx context.Context) {
 }
 
 func (c *Client) handleRegisterPrinter(msg apitypes.RegisterPrinterMessage) {
+	slog.Info("register printer requested", "name", msg.Name, "type", msg.PrinterType, "portOrUri", msg.PortOrURI, "driver", msg.DriverName)
 	ctx, cancel := context.WithTimeout(context.Background(), printerOpTimeout)
 	defer cancel()
 	err := c.printer.Register(ctx, printer.RegisterPrinterParams{
@@ -728,7 +729,10 @@ func (c *Client) handleRegisterPrinter(msg apitypes.RegisterPrinterMessage) {
 		Printer:   msg.Name,
 	}
 	if err != nil {
+		slog.Error("register printer failed", "name", msg.Name, "err", err)
 		res.Error = err.Error()
+	} else {
+		slog.Info("register printer succeeded", "name", msg.Name)
 	}
 	c.writeJSON(res)
 
@@ -1015,7 +1019,10 @@ func (c *Client) PublishPrintersDetail(ctx context.Context) error {
 			d.IPPURI = share.IPPURI
 			d.SocketURI = share.SocketURI
 		}
-		if c.cfg.Printers.Share.RelayEnabled {
+		if c.cfg.Printers.Share.RelayEnabled && c.shareAllowed(p.Name) {
+			if c.relay != nil && d.SocketURI == "" {
+				d.SocketURI = c.relay.SocketURI(p.Name)
+			}
 			port := c.cfg.Printers.Share.RelayPort
 			if port <= 0 {
 				port = 19100

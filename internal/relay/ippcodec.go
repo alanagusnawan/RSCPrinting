@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"errors"
+	"net/url"
 	"strings"
 )
 
@@ -180,12 +181,22 @@ func buildPrinterAttributesResponse(req ippRequest, printerName, makeModel strin
 	appendOperationAttributes(buf, req.Charset)
 
 	buf.WriteByte(ippTagPrinterAttributes)
-	appendStringAttr(buf, ippTagURI, "printer-uri-supported", "ipp://localhost/printers/"+printerName)
+	appendStringAttr(buf, ippTagURI, "printer-uri-supported", "ipp://localhost/printers/"+url.PathEscape(printerName))
 	appendStringAttr(buf, ippTagName, "printer-name", printerName)
 	appendIntAttr(buf, ippTagEnum, "printer-state", 3) // idle
 	appendBoolAttr(buf, "printer-is-accepting-jobs", true)
 	appendStringAttr(buf, ippTagKeyword, "printer-state-reasons", "none")
 	appendStringAttr(buf, ippTagText, "printer-make-and-model", makeModel)
+	appendStringAttr(buf, ippTagKeyword, "ipp-versions-supported", "1.1")
+	appendStringAttr(buf, ippTagKeyword, "ipp-versions-supported", "2.0")
+	appendStringAttr(buf, ippTagCharset, "charset-configured", "utf-8")
+	appendStringAttr(buf, ippTagCharset, "charset-supported", "utf-8")
+	appendStringAttr(buf, ippTagLanguage, "natural-language-configured", "en-us")
+	appendStringAttr(buf, ippTagLanguage, "generated-natural-language-supported", "en-us")
+	appendStringAttr(buf, ippTagKeyword, "pdl-override-supported", "not-attempted")
+	if len(formats) > 0 {
+		appendStringAttr(buf, ippTagMimeType, "document-format-default", formats[0])
+	}
 	for _, f := range formats {
 		appendStringAttr(buf, ippTagMimeType, "document-format-supported", f)
 	}
@@ -196,11 +207,15 @@ func buildPrinterAttributesResponse(req ippRequest, printerName, makeModel strin
 	return buf.Bytes()
 }
 
-// printerNameFromURI mengambil segmen terakhir printer-uri.
+// printerNameFromURI mengambil segmen terakhir printer-uri dan melakukan unescape.
 func printerNameFromURI(uri string) string {
 	uri = strings.TrimRight(strings.TrimSpace(uri), "/")
+	name := uri
 	if i := strings.LastIndex(uri, "/"); i >= 0 {
-		return uri[i+1:]
+		name = uri[i+1:]
 	}
-	return uri
+	if unescaped, err := url.PathUnescape(name); err == nil {
+		return unescaped
+	}
+	return name
 }

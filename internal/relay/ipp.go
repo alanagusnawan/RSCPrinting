@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -58,7 +59,12 @@ func (s *IPPServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	name := printerNameFromURI(req.PrinterURI)
 	if name == "" {
-		name = strings.Trim(strings.TrimPrefix(r.URL.Path, "/printers/"), "/")
+		rawPath := strings.Trim(strings.TrimPrefix(r.URL.Path, "/printers/"), "/")
+		if unescaped, err := url.PathUnescape(rawPath); err == nil {
+			name = unescaped
+		} else {
+			name = rawPath
+		}
 	}
 
 	switch req.Operation {

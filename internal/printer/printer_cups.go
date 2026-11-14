@@ -137,9 +137,18 @@ func (p *UnixPrinter) printRendered(ctx context.Context, job Job, filePath strin
 
 func (p *UnixPrinter) List(ctx context.Context) ([]PrinterInfo, error) {
 	cmd := cupCmd(ctx, "lpstat", "-p", "-d")
-	out, err := cmd.Output()
+	cmd.Env = append(cmd.Environ(), "LC_ALL=C", "LANG=C")
+	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return nil, fmt.Errorf("lpstat failed: %w", err)
+		outStr := strings.ToLower(string(out))
+		// CUPS mengembalikan exit status 1 saat belum ada queue/default destination
+		if strings.Contains(outStr, "no destinations added") ||
+			strings.Contains(outStr, "tidak ada tujuan") ||
+			strings.Contains(outStr, "no default") ||
+			strings.Contains(outStr, "tidak ada tujuan default") {
+			return []PrinterInfo{}, nil
+		}
+		return nil, fmt.Errorf("lpstat failed: %s (%w)", strings.TrimSpace(string(out)), err)
 	}
 
 	lines := strings.Split(string(out), "\n")
@@ -201,10 +210,21 @@ func (p *UnixPrinter) Register(ctx context.Context, params RegisterPrinterParams
 	}
 
 	args := []string{"-p", params.Name, "-v", uri, "-E"}
-	args = append(args, cupsModelArgs(params)...)
+	modelArgs := cupsModelArgs(params)
 
-	if out, err := cupRun(ctx, "lpadmin", args...); err != nil {
-		return fmt.Errorf("lpadmin failed: %s (%w)", out, err)
+	if out, err := cupRun(ctx, "lpadmin", append(args, modelArgs...)...); err != nil {
+		// Jika gagal dan menyertakan model argumen (misal -m everywhere saat remote host belum probe),
+		// coba fallback tanpa -m agar queue tetap terdaftar di CUPS.
+		if len(modelArgs) > 0 {
+			if retryOut, retryErr := cupRun(ctx, "lpadmin", args...); retryErr == nil {
+				out = retryOut
+				err = nil
+			} else {
+				return fmt.Errorf("lpadmin failed: %s (%w)", out, err)
+			}
+		} else {
+			return fmt.Errorf("lpadmin failed: %s (%w)", out, err)
+		}
 	}
 
 	// Aktifkan & terima job agar printer siap dipakai.
