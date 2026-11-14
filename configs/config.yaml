@@ -23,7 +23,10 @@ printers:
     protocol: auto
     namePattern: "RSC-%s"
     relayEnabled: false
+    relayIppEnabled: true # listener IPP 1 port (multi-printer)
     relayPort: 19100
+    relayRawEnabled: true # listener RAW per printer (Windows 7-11)
+    relayRawBase: 19101
   thermal:
     - name: "Thermal" # queue ESC/POS; dirender ke raster, melewati driver OS
       widthMm: 80 # 58 | 80

@@ -67,6 +67,10 @@ func unixDeviceURI(params RegisterPrinterParams) string {
 		if strings.Contains(uri, "://") {
 			return sanitizeCUPSURI(uri)
 		}
+		// host:port eksplisit (mis. relay) -> socket://host:port
+		if strings.Contains(uri, ":") {
+			return "socket://" + uri
+		}
 		return fmt.Sprintf("socket://%s:9100", uri)
 	default:
 		return sanitizeCUPSURI(uri)

@@ -68,8 +68,11 @@ type ShareConfig struct {
 	NamePattern string `yaml:"namePattern"` // pola nama share, mis. "RSC-%s"
 	// Relay (Model 2) untuk cross-OS: agent membuka listener agar device lain
 	// bisa mencetak lewat agent ini.
-	RelayEnabled bool `yaml:"relayEnabled"`
-	RelayPort    int  `yaml:"relayPort"` // port dasar listener RAW (default 19100)
+	RelayEnabled    bool `yaml:"relayEnabled"`
+	RelayIPPEnabled bool `yaml:"relayIppEnabled"` // listener IPP 1 port (multi-printer)
+	RelayPort       int  `yaml:"relayPort"`       // port IPP (default 19100)
+	RelayRawEnabled bool `yaml:"relayRawEnabled"` // listener RAW per printer
+	RelayRawBase    int  `yaml:"relayRawBase"`    // port dasar RAW (default 19101)
 }
 
 // ThermalPrinterConfig mengatur printer ESC/POS yang dicetak dengan jalur raster
@@ -227,10 +230,13 @@ func DefaultConfig() Config {
 			Allowlist:    []string{},
 			PollInterval: 5 * time.Minute,
 			Share: ShareConfig{
-				Enabled:     true,
-				Protocol:    "auto",
-				NamePattern: "RSC-%s",
-				RelayPort:   19100,
+				Enabled:         true,
+				Protocol:        "auto",
+				NamePattern:     "RSC-%s",
+				RelayIPPEnabled: true,
+				RelayPort:       19100,
+				RelayRawEnabled: true,
+				RelayRawBase:    19101,
 			},
 		},
 		Ghostscript: GhostscriptConfig{

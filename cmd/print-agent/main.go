@@ -5,7 +5,6 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"net/http"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -662,29 +661,22 @@ func runAgentWithMode(ctx context.Context, configPath, modeOverride string) {
 		_ = httpSrv.Shutdown(shutdownCtx)
 	}()
 
-	// Relay Model 2 (opsional): melayani cetak lintas-komputer via IPP.
+	// Relay (Model 2): IPP 1 port + RAW per printer untuk cetak lintas-komputer.
 	if cfg.Printers.Share.RelayEnabled {
-		relayPort := cfg.Printers.Share.RelayPort
-		if relayPort <= 0 {
-			relayPort = 19100
+		relayMgr := relay.NewManager(
+			p,
+			printer.LocalHostname(),
+			cfg.Printers.Share.RelayIPPEnabled,
+			cfg.Printers.Share.RelayPort,
+			cfg.Printers.Share.RelayRawEnabled,
+			cfg.Printers.Share.RelayRawBase,
+			cfg.DataDir,
+		)
+		if err := relayMgr.Start(ctx); err != nil {
+			log.Warn("start print relay failed", "err", err)
 		}
-		relaySrv := &http.Server{
-			Addr:              fmt.Sprintf("0.0.0.0:%d", relayPort),
-			Handler:           relay.NewIPPServer(p),
-			ReadHeaderTimeout: 10 * time.Second,
-		}
-		go func() {
-			<-ctx.Done()
-			shutdownCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-			defer cancel()
-			_ = relaySrv.Shutdown(shutdownCtx)
-		}()
-		go func() {
-			log.Info("print relay (IPP) listening", "addr", relaySrv.Addr)
-			if err := relaySrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-				log.Warn("print relay stopped", "err", err)
-			}
-		}()
+		wsClient.SetRelay(relayMgr)
+		defer relayMgr.Close()
 	}
 
 	up.MarkStartupHealthy()

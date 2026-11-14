@@ -51,10 +51,36 @@ $Assets = @(
 function Info([string]$msg) { Write-Host "[release] $msg" }
 function Fail([string]$msg) { Write-Error "[release] $msg"; exit 1 }
 
+# Ambil PAT yang tersimpan untuk github.com via Git Credential Manager,
+# agar tidak perlu set GH_TOKEN manual bila sudah pernah `git push`.
+function Get-StoredGitHubToken {
+    $eap = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $out = "protocol=https`nhost=github.com`n`n" | git credential fill 2>$null
+    }
+    finally {
+        $ErrorActionPreference = $eap
+    }
+    $line = ($out | Where-Object { $_ -like 'password=*' } | Select-Object -First 1)
+    if ($line) { return ($line -replace '^password=', '') }
+    return ''
+}
+
 function Invoke-Git {
     param([string[]]$GitArgs)
-    $out = & git @GitArgs 2>$null
-    if ($LASTEXITCODE -ne 0) { throw "git $($GitArgs -join ' ') gagal (exit $LASTEXITCODE)" }
+    # Native command (git) menulis progres ke stderr; dengan EAP=Stop itu bisa
+    # dianggap error fatal. Turunkan EAP sementara agar hanya exit code yang dinilai.
+    $eap = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $out = & git @GitArgs 2>&1
+        $code = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $eap
+    }
+    if ($code -ne 0) { throw "git $($GitArgs -join ' ') gagal (exit $code)" }
     return $out
 }
 
@@ -124,8 +150,15 @@ try {
     $semver = $tag.TrimStart('v')
     Info "Versi rilis: $tag (semver $semver)"
 
+    $tagExists = $false
     if (& git rev-parse -q --verify "refs/tags/$tag" 2>$null) {
-        Fail "Tag $tag sudah ada. Pakai versi lain / naikkan lagi."
+        $tagExists = $true
+        $tagCommit = ((& git rev-parse "$tag^{}") -join '').Trim()
+        $headCommit = ((& git rev-parse 'HEAD') -join '').Trim()
+        if ($tagCommit -ne $headCommit) {
+            Fail "Tag $tag sudah ada tetapi menunjuk commit lain ($tagCommit). Naikkan versi."
+        }
+        Info "Tag $tag sudah ada di commit HEAD; lanjut ke pembuatan release."
     }
 
     $commit = ((& git rev-parse --short HEAD) -join '').Trim()
@@ -180,19 +213,28 @@ try {
     }
 
     # --- 6. Tag + push ------------------------------------------------------
-    Info "membuat tag $tag"
-    Invoke-Git @('tag', '-a', $tag, '-m', "release $tag") | Out-Null
-    if (-not $SkipPush) {
-        Info "push tag ke origin"
-        Invoke-Git @('push', 'origin', $tag) | Out-Null
+    if (-not $tagExists) {
+        Info "membuat tag $tag"
+        Invoke-Git @('tag', '-a', $tag, '-m', "release $tag") | Out-Null
+        if (-not $SkipPush) {
+            Info "push tag ke origin"
+            Invoke-Git @('push', 'origin', $tag) | Out-Null
+        }
+        else {
+            Info "SkipPush: tag tidak di-push."
+        }
     }
     else {
-        Info "SkipPush: tag tidak di-push."
+        Info "Lewati pembuatan/push tag (sudah ada)."
     }
 
     # --- 7. GitHub Release via REST API ------------------------------------
-    $tok = if ($Token) { $Token } elseif ($env:GH_TOKEN) { $env:GH_TOKEN } elseif ($env:GITHUB_TOKEN) { $env:GITHUB_TOKEN } else { '' }
-    if (-not $tok) { Fail "Token tidak ada. Set environment GH_TOKEN (atau GITHUB_TOKEN), atau pakai -Token." }
+    $tok = if ($Token) { $Token }
+    elseif ($env:GH_TOKEN) { $env:GH_TOKEN }
+    elseif ($env:GITHUB_TOKEN) { $env:GITHUB_TOKEN }
+    else { Get-StoredGitHubToken }
+    if (-not $tok) { Fail "Token tidak ada. Set environment GH_TOKEN (atau GITHUB_TOKEN), pakai -Token, atau login git untuk github.com." }
+    Info "token: $([bool]$tok) (tidak ditampilkan)"
 
     $headers = @{
         Authorization          = "Bearer $tok"

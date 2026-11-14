@@ -8,9 +8,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -431,14 +433,74 @@ func runPS(ctx context.Context, script string) (string, error) {
 	return strings.TrimSpace(string(out)), err
 }
 
-// defaultWindowsDriver memilih driver bawaan bila driver tidak diberikan.
-func defaultWindowsDriver(params RegisterPrinterParams) string {
-	switch params.Type {
-	case PrinterTypeHTTPShared:
-		return "Microsoft IPP Class Driver"
-	default:
-		return "Generic / Text Only"
+// looksIPP melaporkan apakah endpoint berupa URL IPP/HTTP.
+func looksIPP(s string) bool {
+	l := strings.ToLower(s)
+	return strings.HasPrefix(l, "ipp://") || strings.HasPrefix(l, "ipps://") ||
+		strings.HasPrefix(l, "http://") || strings.HasPrefix(l, "https://")
+}
+
+// parseRawEndpoint mengenali "socket://host:port" atau "host:port".
+func parseRawEndpoint(s string) (string, int, bool) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return "", 0, false
 	}
+	if strings.HasPrefix(strings.ToLower(s), "socket://") {
+		s = s[len("socket://"):]
+	} else if strings.Contains(s, "://") {
+		return "", 0, false
+	}
+	host, portStr, err := net.SplitHostPort(s)
+	if err != nil {
+		return "", 0, false
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil || port <= 0 || port > 65535 {
+		return "", 0, false
+	}
+	return host, port, true
+}
+
+func rawPortName(host string, port int) string {
+	safe := strings.NewReplacer(".", "_", ":", "_", "\\", "_", "/", "_", " ", "_").Replace(host)
+	return fmt.Sprintf("RSC_%s_%d", safe, port)
+}
+
+// psRawScript membangun skrip pemasangan queue RAW (TCP/IP) untuk Windows 7 s/d 11.
+// Windows 7 tidak punya cmdlet Add-PrinterPort/Add-Printer -> pakai prnport.vbs/prnmngr.vbs.
+func psRawScript(name, driver, host string, port int) string {
+	portName := rawPortName(host, port)
+	return fmt.Sprintf(
+		`$OS=[Environment]::OSVersion.Version; `+
+			`$win7=($OS.Major -lt 6) -or ($OS.Major -eq 6 -and $OS.Minor -lt 2); `+
+			`$portName='%s'; `+
+			`$scripts=Join-Path $env:windir 'System32\Printing_Admin_Scripts'; `+
+			`$locale=(Get-ChildItem -Path $scripts -Directory -ErrorAction SilentlyContinue | Select-Object -First 1).FullName; `+
+			`if ($win7) { `+
+			`cscript //nologo (Join-Path $locale 'prnport.vbs') -a -r $portName -h '%s' -o raw -n %d; `+
+			`if ($LASTEXITCODE -ne 0) { throw "prnport.vbs gagal (exit $LASTEXITCODE)" }; `+
+			`cscript //nologo (Join-Path $locale 'prnmngr.vbs') -a -p '%s' -m '%s' -r $portName; `+
+			`if ($LASTEXITCODE -ne 0) { throw "prnmngr.vbs gagal (exit $LASTEXITCODE)" } `+
+			`} else { `+
+			`if (-not (Get-PrinterPort -Name $portName -ErrorAction SilentlyContinue)) { `+
+			`Add-PrinterPort -Name $portName -PrinterHostAddress '%s' -PortNumber %d -ErrorAction Stop }; `+
+			`Add-Printer -Name '%s' -DriverName '%s' -PortName $portName -ErrorAction Stop `+
+			`}`,
+		escapePS(portName),
+		escapePS(host), port,
+		escapePS(name), escapePS(driver),
+		escapePS(host), port,
+		escapePS(name), escapePS(driver),
+	)
+}
+
+func psIPPScript(name, url string) string {
+	return fmt.Sprintf(`Add-Printer -Name '%s' -IppURL '%s' -ErrorAction Stop`, escapePS(name), escapePS(url))
+}
+
+func psConnectionScript(url string) string {
+	return fmt.Sprintf(`Add-Printer -ConnectionName '%s' -ErrorAction Stop`, escapePS(url))
 }
 
 // Register memasang queue printer. Idempotent: bila printer sudah ada,
@@ -447,7 +509,6 @@ func (p *WindowsPrinter) Register(ctx context.Context, params RegisterPrinterPar
 	if strings.TrimSpace(params.Name) == "" {
 		return fmt.Errorf("printer name required")
 	}
-	cleanName := escapePS(params.Name)
 
 	// Printer sudah ada -> perbarui (repoint) saja.
 	if _, err := p.Info(ctx, params.Name); err == nil {
@@ -460,38 +521,53 @@ func (p *WindowsPrinter) Register(ctx context.Context, params RegisterPrinterPar
 		})
 	}
 
-	driver := params.DriverName
-	if driver == "" {
-		driver = defaultWindowsDriver(params)
-	}
-	cleanDriver := escapePS(driver)
-
+	endpoint := strings.TrimSpace(params.PortOrURI)
 	var psScript string
 
-	switch params.Type {
-	case PrinterTypeHTTPShared:
-		// Bisa UNC (\\host\share) atau URL IPP/http.
-		psScript = fmt.Sprintf("Add-Printer -ConnectionName '%s'", escapePS(params.PortOrURI))
-	case PrinterTypeIP:
-		portName := fmt.Sprintf("IP_%s", params.PortOrURI)
-		psScript = fmt.Sprintf(
-			`$port = Get-PrinterPort -Name '%s' -ErrorAction SilentlyContinue; `+
-				`if (-not $port) { Add-PrinterPort -Name '%s' -PrinterHostAddress '%s' -PortNumber 9100 }; `+
-				`Add-Printer -Name '%s' -DriverName '%s' -PortName '%s'`,
-			escapePS(portName), escapePS(portName), escapePS(params.PortOrURI), cleanName, cleanDriver, escapePS(portName),
-		)
-	case PrinterTypeUSB, PrinterTypeBluetooth:
-		psScript = fmt.Sprintf("Add-Printer -Name '%s' -DriverName '%s' -PortName '%s'", cleanName, cleanDriver, escapePS(params.PortOrURI))
+	switch {
+	case strings.HasPrefix(endpoint, `\\`):
+		// UNC SMB: \\Server\Share
+		psScript = psConnectionScript(endpoint)
+
+	case looksIPP(endpoint):
+		// IPP/HTTP (butuh fitur Internet Printing Client).
+		psScript = psIPPScript(params.Name, endpoint)
+
+	case params.Type == PrinterTypeUSB || params.Type == PrinterTypeBluetooth:
+		driver := params.DriverName
+		if driver == "" {
+			driver = "Generic / Text Only"
+		}
+		psScript = fmt.Sprintf("Add-Printer -Name '%s' -DriverName '%s' -PortName '%s' -ErrorAction Stop",
+			escapePS(params.Name), escapePS(driver), escapePS(endpoint))
+
 	default:
-		return fmt.Errorf("unsupported printer type: %s", params.Type)
+		host, port, ok := parseRawEndpoint(endpoint)
+		if !ok && params.Type == PrinterTypeIP && endpoint != "" && !strings.ContainsAny(endpoint, " /\\") {
+			// IP/host tanpa port -> RAW default 9100.
+			host, port, ok = endpoint, 9100, true
+		}
+		if !ok {
+			return fmt.Errorf("unsupported endpoint %q (butuh \\\\host\\share, http(s)://, ipp://, atau socket://host:port)", endpoint)
+		}
+		driver := params.DriverName
+		if driver == "" {
+			driver = "Generic / Text Only"
+		}
+		psScript = psRawScript(params.Name, driver, host, port)
 	}
 
 	if params.IsDefault {
-		psScript += fmt.Sprintf(`; (New-Object -ComObject WScript.Network).SetDefaultPrinter('%s')`, cleanName)
+		psScript += fmt.Sprintf(`; (New-Object -ComObject WScript.Network).SetDefaultPrinter('%s')`, escapePS(params.Name))
 	}
 
-	if out, err := runPS(ctx, psScript); err != nil {
-		return fmt.Errorf("register printer failed: %s (%w)", out, err)
+	out, err := runPS(ctx, psScript)
+	if err != nil {
+		msg := strings.TrimSpace(out)
+		if msg == "" {
+			msg = "tanpa detail; periksa hak Administrator & driver printer terpasang"
+		}
+		return fmt.Errorf("register printer failed: %s (%w)", msg, err)
 	}
 	p.invalidateEnum()
 	return nil
