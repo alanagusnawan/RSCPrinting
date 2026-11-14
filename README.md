@@ -384,16 +384,24 @@ Dua model:
 - **Model 1 — Berbagi lewat OS** (sesama Windows / sesama Unix):
   - A Windows → share SMB `\\HOST_A\RSC-<printer>`; A Unix → CUPS IPP `ipp://HOST_A.local:631/printers/<printer>`.
   - B memasang queue ke endpoint itu (`register_printer` dengan `printerType: HTTP_SHARED`).
-- **Model 2 — Relay IPP** (`printers.share.relayEnabled: true`, cross-OS & driverless):
-  - A membuka listener IPP (`relayPort`, default 19100). B memasang `ipp://HOST_A:<relayPort>/printers/<printer>`.
-  - Dokumen yang diterima A dirender/dicetak lewat pipeline yang sudah ada.
+- **Model 2 — Relay** (`printers.share.relayEnabled: true`, cross-OS):
+  - **IPP (1 port, multi-printer, driverless):** A membuka listener IPP (`relayPort`, default 19100).
+    B memasang `ipp://HOST_A:19100/printers/<printer>` (Windows: butuh fitur *Internet Printing Client*).
+  - **RAW (1 port per printer, paling andal di Windows 7–11):** A membuka listener RAW
+    (`relayRawBase`, default 19101 + indeks). B memasang Standard TCP/IP port ke `HOST_A:<port>`
+    dengan driver printer (mis. `EPSON L3210 Series`). Windows 7 memakai `prnport.vbs`/`prnmngr.vbs`.
+  - `printers_detail` A memuat `ippUri` dan `socketUri` per printer; server memilih endpoint sesuai OS B.
+
+  Catatan: TCP RAW tidak punya nama/path → **tidak bisa banyak printer dalam 1 port**; untuk
+  multi-printer gunakan IPP (1 port), atau RAW dengan 1 port per printer.
 
 **IP dinamis (DHCP):** endpoint memakai **hostname** (bukan IP) agar spooler me-resolve ulang tiap job;
 selain itu agent A melaporkan `printers_detail` (hostname + IP terbaru) tiap connect / saat berubah,
 dan server dapat mengirim `update_printer` ke B untuk repoint. IP hanya fallback.
 
-**Prasyarat:** A menyala saat jam kerja; firewall membuka `631` (IPP), `445/139` (SMB), dan `relayPort`;
-hak admin/root saat share/install; Linux A: `avahi-daemon` untuk mDNS.
+**Prasyarat:** A menyala saat jam kerja; firewall membuka `631` (IPP), `445/139` (SMB), `relayPort`
+dan range `relayRawBase` (RAW); hak admin/root saat share/install; Linux A: `avahi-daemon` untuk mDNS.
+Untuk RAW: driver printer harus tersedia di B (Windows 7 perlu driver khusus Win7).
 
 ---
 

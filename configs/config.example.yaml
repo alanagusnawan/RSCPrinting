@@ -37,8 +37,11 @@ printers:
     enabled: true          # auto-share printer di allowlist saat agent start
     protocol: auto         # auto | smb | ipp
     namePattern: "RSC-%s"  # pola nama share OS
-    relayEnabled: false    # Model 2: buka listener IPP agar cross-OS driverless
-    relayPort: 19100       # port listener relay IPP
+    relayEnabled: false    # Model 2: buka listener agar device lain bisa mencetak
+    relayIppEnabled: true  # listener IPP 1 port (multi-printer, driverless)
+    relayPort: 19100       # port IPP
+    relayRawEnabled: true  # listener RAW per printer (Windows 7-11)
+    relayRawBase: 19101    # port dasar RAW
 
 ghostscript:
   path: ""  # kosong = auto-detect (Windows)

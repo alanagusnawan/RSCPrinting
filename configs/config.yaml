@@ -4,7 +4,7 @@ server:
   port: 8080
   enable_local_print_endpoint: true # aktifkan hanya untuk standalone / testing
 ws_server:
-  url: "ws://172.16.0.201:5488/agent/ws" # kosong = baca dari ./data/config atau env PRINT_AGENT_WS_URL (default: ws://localhost:5488/agent/ws)
+  url: "ws://172.16.0.237:5488/agent/ws" # kosong = baca dari ./data/config atau env PRINT_AGENT_WS_URL (default: ws://localhost:5488/agent/ws)
   token: "secret-print-token-12345" # kosong = generate otomatis dan simpan di ./data/config atau env PRINT_AGENT_WS_TOKEN
   reconnectBackoffMax: 60s
   handshakeTimeout: 15s
@@ -23,7 +23,10 @@ printers:
     protocol: auto
     namePattern: "RSC-%s"
     relayEnabled: false
+    relayIppEnabled: true # listener IPP 1 port (multi-printer)
     relayPort: 19100
+    relayRawEnabled: true # listener RAW per printer (Windows 7-11)
+    relayRawBase: 19101
   thermal:
     - name: "Thermal" # queue ESC/POS; dirender ke raster, melewati driver OS
       widthMm: 80 # 58 | 80

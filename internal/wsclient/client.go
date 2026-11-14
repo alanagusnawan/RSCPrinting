@@ -20,6 +20,7 @@ import (
 	"github.com/rscprinting/print-agent/internal/jobs"
 	"github.com/rscprinting/print-agent/internal/printer"
 	"github.com/rscprinting/print-agent/internal/queue"
+	"github.com/rscprinting/print-agent/internal/relay"
 	"github.com/rscprinting/print-agent/internal/storage"
 	"github.com/rscprinting/print-agent/internal/version"
 	"github.com/rscprinting/print-agent/pkg/apitypes"
@@ -67,7 +68,12 @@ type Client struct {
 
 	shareMu    sync.Mutex
 	shareCache map[string]printer.PrinterShare
+
+	relay *relay.Manager
 }
+
+// SetRelay menautkan relay manager (opsional) ke client.
+func (c *Client) SetRelay(m *relay.Manager) { c.relay = m }
 
 func New(cfg config.Config, p printer.Printer, qm *queue.Manager, store *storage.Store, jobReg *jobs.Registry) *Client {
 	return &Client{
@@ -979,6 +985,21 @@ func (c *Client) PublishPrintersDetail(ctx context.Context) error {
 		OS:       runtime.GOOS,
 		IPs:      printer.LocalIPs(),
 	}
+	// Tentukan printer yang dibagikan + sinkronkan listener RAW relay.
+	var sharedNames []string
+	if c.relay != nil {
+		for _, p := range list {
+			if c.shareAllowed(p.Name) {
+				sharedNames = append(sharedNames, p.Name)
+			}
+		}
+		c.relay.Reconcile(sharedNames)
+	}
+	shared := make(map[string]bool, len(sharedNames))
+	for _, n := range sharedNames {
+		shared[n] = true
+	}
+
 	for _, p := range list {
 		d := apitypes.PrinterDetail{
 			Name:      p.Name,
@@ -993,12 +1014,18 @@ func (c *Client) PublishPrintersDetail(ctx context.Context) error {
 			d.IPPURI = share.IPPURI
 			d.SocketURI = share.SocketURI
 		}
-		if c.cfg.Printers.Share.RelayEnabled {
-			port := c.cfg.Printers.Share.RelayPort
-			if port <= 0 {
-				port = 19100
+		if c.relay != nil && shared[p.Name] {
+			if uri := c.relay.IPPURI(p.Name); uri != "" {
+				d.IPPURI = uri
+				d.Shared = true
+				if d.Protocol == "" {
+					d.Protocol = "relay"
+				}
 			}
-			d.RelayURI = fmt.Sprintf("ipp://%s:%d/printers/%s", printer.LocalHostname(), port, p.Name)
+			if uri := c.relay.SocketURI(p.Name); uri != "" {
+				d.SocketURI = uri
+				d.Shared = true
+			}
 		}
 		msg.Printers = append(msg.Printers, d)
 	}

@@ -13,6 +13,8 @@ func TestUnixDeviceURI(t *testing.T) {
 		{"unc->smb", RegisterPrinterParams{Type: PrinterTypeHTTPShared, PortOrURI: `\\host\RSC-x`}, "smb://host/RSC-x"},
 		{"ipp stays", RegisterPrinterParams{Type: PrinterTypeHTTPShared, PortOrURI: "ipp://a/printers/x"}, "ipp://a/printers/x"},
 		{"ip->socket", RegisterPrinterParams{Type: PrinterTypeIP, PortOrURI: "192.168.1.5"}, "socket://192.168.1.5:9100"},
+		{"ip host:port", RegisterPrinterParams{Type: PrinterTypeIP, PortOrURI: "172.16.0.161:19101"}, "socket://172.16.0.161:19101"},
+		{"socket passthrough", RegisterPrinterParams{Type: PrinterTypeIP, PortOrURI: "socket://h:1"}, "socket://h:1"},
 		{"usb dev", RegisterPrinterParams{Type: PrinterTypeUSB, PortOrURI: "/dev/usb/lp0"}, "/dev/usb/lp0"},
 	}
 	for _, c := range cases {
