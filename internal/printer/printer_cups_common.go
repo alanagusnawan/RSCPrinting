@@ -2,8 +2,36 @@ package printer
 
 import (
 	"fmt"
+	"net/url"
 	"strings"
 )
+
+// sanitizeCUPSURI memastikan path URL di-percent-encode agar valid di CUPS/lpadmin.
+func sanitizeCUPSURI(rawURI string) string {
+	parts := strings.SplitN(rawURI, "://", 2)
+	if len(parts) != 2 {
+		return rawURI
+	}
+	scheme, rest := parts[0], parts[1]
+
+	// Pisahkan host[:port] dan path
+	hostPath := strings.SplitN(rest, "/", 2)
+	host := hostPath[0]
+	if len(hostPath) == 1 {
+		return scheme + "://" + host
+	}
+
+	pathParts := strings.Split(hostPath[1], "/")
+	for i, segment := range pathParts {
+		// unescape dulu bila sudah ada yang di-escape agar tidak double encode
+		if unescaped, err := url.PathUnescape(segment); err == nil {
+			segment = unescaped
+		}
+		pathParts[i] = url.PathEscape(segment)
+	}
+
+	return scheme + "://" + host + "/" + strings.Join(pathParts, "/")
+}
 
 // unixDeviceURI menormalkan PortOrURI menjadi device URI yang dipahami CUPS.
 // Menerima: URL ipp/http(s), UNC Windows (\\host\share), path device, atau IP
@@ -25,23 +53,23 @@ func unixDeviceURI(params RegisterPrinterParams) string {
 	case PrinterTypeHTTPShared:
 		switch {
 		case strings.HasPrefix(low, "http://"):
-			return "ipp://" + uri[len("http://"):]
+			return sanitizeCUPSURI("ipp://" + uri[len("http://"):])
 		case strings.HasPrefix(low, "https://"):
-			return "ipps://" + uri[len("https://"):]
+			return sanitizeCUPSURI("ipps://" + uri[len("https://"):])
 		default:
 			if strings.Contains(uri, "://") {
-				return uri
+				return sanitizeCUPSURI(uri)
 			}
 			// Dianggap host atau host/printers/name -> IPP.
-			return "ipp://" + strings.TrimPrefix(uri, "/")
+			return sanitizeCUPSURI("ipp://" + strings.TrimPrefix(uri, "/"))
 		}
 	case PrinterTypeIP:
 		if strings.Contains(uri, "://") {
-			return uri
+			return sanitizeCUPSURI(uri)
 		}
 		return fmt.Sprintf("socket://%s:9100", uri)
 	default:
-		return uri
+		return sanitizeCUPSURI(uri)
 	}
 }
 
@@ -91,7 +119,7 @@ func ippURI(host string, port int, name string) string {
 	if port <= 0 {
 		port = 631
 	}
-	return fmt.Sprintf("ipp://%s:%d/printers/%s", host, port, name)
+	return fmt.Sprintf("ipp://%s:%d/printers/%s", host, port, url.PathEscape(name))
 }
 
 // socketURI membentuk URI RAW socket.

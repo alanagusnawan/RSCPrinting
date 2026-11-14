@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -998,7 +999,7 @@ func (c *Client) PublishPrintersDetail(ctx context.Context) error {
 			if port <= 0 {
 				port = 19100
 			}
-			d.RelayURI = fmt.Sprintf("ipp://%s:%d/printers/%s", printer.LocalHostname(), port, p.Name)
+			d.RelayURI = fmt.Sprintf("ipp://%s:%d/printers/%s", printer.LocalHostname(), port, url.PathEscape(p.Name))
 		}
 		msg.Printers = append(msg.Printers, d)
 	}

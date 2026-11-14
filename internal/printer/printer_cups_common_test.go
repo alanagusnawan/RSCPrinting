@@ -9,6 +9,7 @@ func TestUnixDeviceURI(t *testing.T) {
 		want string
 	}{
 		{"http->ipp", RegisterPrinterParams{Type: PrinterTypeHTTPShared, PortOrURI: "http://a:631/printers/x"}, "ipp://a:631/printers/x"},
+		{"http->ipp with space", RegisterPrinterParams{Type: PrinterTypeHTTPShared, PortOrURI: "http://DESKTOP-T0CGKSE:19100/printers/EPSON TM-T82X Receipt6"}, "ipp://DESKTOP-T0CGKSE:19100/printers/EPSON%20TM-T82X%20Receipt6"},
 		{"https->ipps", RegisterPrinterParams{Type: PrinterTypeHTTPShared, PortOrURI: "https://a/printers/x"}, "ipps://a/printers/x"},
 		{"unc->smb", RegisterPrinterParams{Type: PrinterTypeHTTPShared, PortOrURI: `\\host\RSC-x`}, "smb://host/RSC-x"},
 		{"ipp stays", RegisterPrinterParams{Type: PrinterTypeHTTPShared, PortOrURI: "ipp://a/printers/x"}, "ipp://a/printers/x"},
@@ -49,7 +50,7 @@ func TestShareHelpers(t *testing.T) {
 	if got := smbPath("host", "RSC-x"); got != `\\host\RSC-x` {
 		t.Errorf("smbPath = %q", got)
 	}
-	if got := ippURI("host", 631, "Thermal"); got != "ipp://host:631/printers/Thermal" {
+	if got := ippURI("host", 631, "Thermal Receipt"); got != "ipp://host:631/printers/Thermal%20Receipt" {
 		t.Errorf("ippURI = %q", got)
 	}
 	if got := ippURI("host", 0, "Thermal"); got != "ipp://host:631/printers/Thermal" {

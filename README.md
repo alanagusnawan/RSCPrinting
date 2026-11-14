@@ -52,6 +52,25 @@ lokal. Kompatibel **Windows 7 SP1+ s/d Windows 11**, Linux, dan macOS.
 ### Linux / macOS
 1. **CUPS** aktif dengan `lp` dan `lpstat` tersedia di PATH.
 
+#### Menjalankan Binary di macOS (Apple Silicon / Intel)
+File binary yang diunduh dari browser/GitHub Release akan diblokir Gatekeeper dan belum memiliki izin eksekusi. Gunakan perintah dinamis berikut:
+
+```bash
+# Deteksi arsitektur otomatis (arm64 atau amd64)
+ARCH=$(uname -m)
+[ "$ARCH" = "x86_64" ] && ARCH="amd64"
+BINARY="print-agent-darwin-${ARCH}"
+
+# Beri permission execute
+chmod +x "$BINARY"
+
+# Lepas atribut karantina Gatekeeper macOS
+xattr -d com.apple.quarantine "$BINARY" 2>/dev/null || xattr -cr "$BINARY"
+
+# Jalankan agent
+./"$BINARY" serve --config configs/config.yaml
+```
+
 ---
 
 ## Instalasi Cepat (Windows, satu perintah)
