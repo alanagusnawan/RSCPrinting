@@ -71,6 +71,12 @@ param(
 
     [switch]$Force,
 
+    [string]$RelayHost = '',
+
+    [int]$RelayPort = 19100,
+
+    [string]$RelayName = 'Thermal Komputer A',
+
     [string]$LogPath = ''
 )
 
@@ -657,9 +663,12 @@ $script:GhToken = $GhToken
 $psMajor = $PSVersionTable.PSVersion.Major
 $osCaption = (Get-WmiObject Win32_OperatingSystem).Caption
 Write-Log "OS: $osCaption | PowerShell: $psMajor | PrinterSpec: $PrinterSpec"
+if ($RelayHost) {
+    Write-Log "Mode Relay Client Komputer B aktif -> target host: $RelayHost : $RelayPort (nama queue: '$RelayName')."
+}
 if ($script:GhToken) { Write-Log 'GitHub token: tersedia.' } else { Write-Log 'GitHub token: tidak ada (repo privat akan gagal unduh; set -GhToken / env PRINT_AGENT_GH_TOKEN).' 'WARN' }
 
-if (-not (Test-Path -LiteralPath $PrinterSpec)) { throw "File spec printer tidak ditemukan: $PrinterSpec" }
+if (-not $RelayHost -and -not (Test-Path -LiteralPath $PrinterSpec)) { throw "File spec printer tidak ditemukan: $PrinterSpec" }
 
 if ((-not $script:Caps.AddPrinter) -and (-not $DriverName)) {
     throw 'Jalur fallback Windows 7 membutuhkan -DriverName agar INF driver bisa ditemukan.'
@@ -672,13 +681,28 @@ if ($AgentExe -and -not (Test-Path -LiteralPath $AgentExe)) {
     throw "Binary agent tidak ditemukan: $AgentExe"
 }
 
-$rows = @(Import-Csv -LiteralPath $PrinterSpec)
-if ($rows.Count -eq 0) { throw "Tidak ada baris printer di $PrinterSpec." }
+$rows = @()
+if ($RelayHost) {
+    # Mode Relay Client: otomatis daftarkan satu atau lebih queue mengarah ke Komputer A
+    Write-Log "Membuat spesifikasi printer relay menuju $RelayHost:$RelayPort."
+    $rows = @(
+        [pscustomobject]@{
+            Name = $RelayName
+            Model = 'Generic / Text Only'
+            Port = "socket://${RelayHost}:${RelayPort}"
+            Default = 'true'
+            Thermal = 'true'
+        }
+    )
+} else {
+    $rows = @(Import-Csv -LiteralPath $PrinterSpec)
+}
+if ($rows.Count -eq 0) { throw "Tidak ada baris printer untuk dipasang." }
 Write-Log "Ditemukan $($rows.Count) entri printer."
 
 # Provisioning driver APD (opsional; dilewati bila tidak ada sumber).
 $script:DriverProvisionFailed = $false
-$hasDriverSource = $InstallerPath -or $ApdUrl -or ($DriverSource -eq 'local') -or ($DriverSource -eq 'github' -and $GithubRepo)
+$hasDriverSource = (-not $RelayHost) -and ($InstallerPath -or $ApdUrl -or ($DriverSource -eq 'local') -or ($DriverSource -eq 'github' -and $GithubRepo))
 if ($hasDriverSource) {
     try {
         Provision-Driver | Out-Null

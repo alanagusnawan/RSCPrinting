@@ -37,6 +37,9 @@ param(
     [switch]$TestPrint,
     [switch]$Force,
     [switch]$ForceDriverUpdate,
+    [string]$RelayHost = '',
+    [int]$RelayPort = 19100,
+    [string]$RelayName = 'Thermal Komputer A',
     [string]$LogPath = ''
 )
 
@@ -135,6 +138,9 @@ $deployArgs = @{
     ConfigPath           = $ConfigPath
     AgentExe             = $AgentExe
     Autorun              = $Autorun
+    RelayHost            = $RelayHost
+    RelayPort            = $RelayPort
+    RelayName            = $RelayName
     LogPath              = $LogPath
 }
 if ($TestPrint) { $deployArgs['TestPrint'] = $true }

@@ -20,12 +20,16 @@ import (
 // UnixPrinter mengimplementasikan Printer lewat CUPS (lp/lpadmin/lpstat).
 // Berlaku untuk Linux dan macOS; perbedaan kecil ditangani di file per-OS.
 type UnixPrinter struct {
+	gsPath         string
 	officePath     string
 	convertTimeout time.Duration
 	allowRaw       bool
+	thermal        []config.ThermalPrinterConfig
 }
 
 func New(cfg config.Config) (*UnixPrinter, error) {
+	gs := render.FindGhostscript(cfg.Ghostscript.Path)
+
 	office := ""
 	if cfg.Office.Enabled {
 		office = render.FindLibreOffice(cfg.Office.Path)
@@ -37,10 +41,38 @@ func New(cfg config.Config) (*UnixPrinter, error) {
 	}
 
 	return &UnixPrinter{
+		gsPath:         gs,
 		officePath:     office,
 		convertTimeout: cfg.Document.ConvertTimeout,
 		allowRaw:       allowRaw,
+		thermal:        cfg.Printers.Thermal,
 	}, nil
+}
+
+func (p *UnixPrinter) resolveGhostscript() string {
+	if p.gsPath != "" {
+		return p.gsPath
+	}
+	p.gsPath = render.FindGhostscript("")
+	return p.gsPath
+}
+
+// thermalOptions mengembalikan konfigurasi render thermal bila printer terdaftar
+// sebagai thermal di config.
+func (p *UnixPrinter) thermalOptions(printerName string) (*render.ThermalOptions, bool) {
+	cfg, ok := config.PrintersConfig{Thermal: p.thermal}.ThermalFor(printerName)
+	if !ok {
+		return nil, false
+	}
+	return &render.ThermalOptions{
+		GhostscriptPath: p.resolveGhostscript(),
+		WidthMm:         cfg.ResolvedWidthMm(),
+		DPI:             cfg.ResolvedDPI(),
+		Cut:             cfg.ResolvedCut(),
+		Trim:            cfg.ResolvedTrim(),
+		Feed:            cfg.ResolvedFeed(),
+		Timeout:         p.convertTimeout,
+	}, true
 }
 
 // cupBin mencari binary CUPS di PATH lalu di lokasi umum (/usr/sbin dsb).
@@ -67,6 +99,8 @@ func cupRun(ctx context.Context, name string, args ...string) (string, error) {
 }
 
 func (p *UnixPrinter) Print(ctx context.Context, job Job) error {
+	thermal, _ := p.thermalOptions(job.Printer)
+
 	doc, err := render.Prepare(ctx, render.Input{
 		FilePath:    job.FilePath,
 		Format:      job.Format,
@@ -76,6 +110,7 @@ func (p *UnixPrinter) Print(ctx context.Context, job Job) error {
 		OfficePath:     p.officePath,
 		ConvertTimeout: p.convertTimeout,
 		Paper:          job.Template.Paper,
+		Thermal:        thermal,
 	})
 	if err != nil {
 		return err

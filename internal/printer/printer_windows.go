@@ -10,7 +10,6 @@ import (
 	"net"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -34,7 +33,7 @@ type WindowsPrinter struct {
 }
 
 func New(cfg config.Config) (*WindowsPrinter, error) {
-	gs := findGhostscript(cfg.Ghostscript.Path)
+	gs := render.FindGhostscript(cfg.Ghostscript.Path)
 
 	office := ""
 	if cfg.Office.Enabled {
@@ -273,7 +272,7 @@ func (p *WindowsPrinter) resolveGhostscript() string {
 	if p.gsPath != "" {
 		return p.gsPath
 	}
-	p.gsPath = findGhostscript("")
+	p.gsPath = render.FindGhostscript("")
 	return p.gsPath
 }
 
@@ -293,40 +292,6 @@ func (p *WindowsPrinter) thermalOptions(printerName string) (*render.ThermalOpti
 		Feed:            cfg.ResolvedFeed(),
 		Timeout:         p.convertTimeout,
 	}, true
-}
-
-func findGhostscript(override string) string {
-	if override != "" {
-		if _, err := os.Stat(override); err == nil {
-			return override
-		}
-	}
-
-	for _, name := range []string{"gswin64c.exe", "gswin32c.exe", "gswin64c", "gswin32c"} {
-		if path, err := exec.LookPath(name); err == nil {
-			return path
-		}
-	}
-
-	searchDirs := []string{
-		`C:\Program Files\gs`,
-		`C:\Program Files (x86)\gs`,
-	}
-
-	for _, root := range searchDirs {
-		matches, err := filepath.Glob(filepath.Join(root, "gs*", "bin", "gswin*.exe"))
-		if err == nil && len(matches) > 0 {
-			for _, m := range matches {
-				base := strings.ToLower(filepath.Base(m))
-				if base == "gswin64c.exe" || base == "gswin32c.exe" {
-					return m
-				}
-			}
-			return matches[0]
-		}
-	}
-
-	return ""
 }
 
 func purgeStuckJobs(ctx context.Context, printerName string) {
@@ -421,7 +386,7 @@ func isClassDriver(driver string) bool {
 func (p *WindowsPrinter) printRendered(ctx context.Context, job Job, filePath string) error {
 	gs := p.gsPath
 	if gs == "" {
-		gs = findGhostscript("")
+		gs = render.FindGhostscript("")
 		p.gsPath = gs
 	}
 	if gs == "" {
@@ -717,7 +682,18 @@ func (p *WindowsPrinter) Share(ctx context.Context, name string, opts ShareOptio
 	if share == "" {
 		share = defaultShareName(name)
 	}
-	ps := fmt.Sprintf("Set-Printer -Name '%s' -Shared $true -ShareName '%s'", escapePS(name), escapePS(share))
+	ps := fmt.Sprintf(
+		`$OS=[Environment]::OSVersion.Version; `+
+			`$win7=($OS.Major -lt 6) -or ($OS.Major -eq 6 -and $OS.Minor -lt 2); `+
+			`if ($win7) { `+
+			`$wp=Get-WmiObject -Class Win32_Printer -Filter "Name='%s'"; `+
+			`if ($wp) { $wp.Shared=$true; $wp.ShareName='%s'; [void]$wp.Put() } else { throw 'printer not found' } `+
+			`} else { `+
+			`Set-Printer -Name '%s' -Shared $true -ShareName '%s' -ErrorAction Stop `+
+			`}`,
+		escapePS(name), escapePS(share),
+		escapePS(name), escapePS(share),
+	)
 	if out, err := runPS(ctx, ps); err != nil {
 		return PrinterShare{}, fmt.Errorf("share printer failed: %s (%w)", out, err)
 	}
@@ -732,7 +708,18 @@ func (p *WindowsPrinter) Share(ctx context.Context, name string, opts ShareOptio
 }
 
 func (p *WindowsPrinter) Unshare(ctx context.Context, name string) error {
-	ps := fmt.Sprintf("Set-Printer -Name '%s' -Shared $false", escapePS(name))
+	ps := fmt.Sprintf(
+		`$OS=[Environment]::OSVersion.Version; `+
+			`$win7=($OS.Major -lt 6) -or ($OS.Major -eq 6 -and $OS.Minor -lt 2); `+
+			`if ($win7) { `+
+			`$wp=Get-WmiObject -Class Win32_Printer -Filter "Name='%s'"; `+
+			`if ($wp) { $wp.Shared=$false; [void]$wp.Put() } else { throw 'printer not found' } `+
+			`} else { `+
+			`Set-Printer -Name '%s' -Shared $false -ErrorAction Stop `+
+			`}`,
+		escapePS(name),
+		escapePS(name),
+	)
 	if out, err := runPS(ctx, ps); err != nil {
 		return fmt.Errorf("unshare printer failed: %s (%w)", out, err)
 	}
@@ -756,12 +743,16 @@ func (p *WindowsPrinter) Update(ctx context.Context, name string, params UpdateP
 
 	setParts := []string{fmt.Sprintf("Set-Printer -Name '%s'", cleanName)}
 	var preParts []string
+	var wmiModifications []string
 
 	if params.NewName != "" {
 		setParts = append(setParts, fmt.Sprintf("-NewName '%s'", strings.ReplaceAll(params.NewName, "'", "''")))
+		// WMI Win32_Printer tidak mendukung rename langsung secara mudah, tapi RenamePrinter method didukung di Win32_Printer
+		wmiModifications = append(wmiModifications, fmt.Sprintf("$wp.RenamePrinter('%s')", strings.ReplaceAll(params.NewName, "'", "''")))
 	}
 	if params.DriverName != "" {
 		setParts = append(setParts, fmt.Sprintf("-DriverName '%s'", strings.ReplaceAll(params.DriverName, "'", "''")))
+		wmiModifications = append(wmiModifications, fmt.Sprintf("$wp.DriverName='%s'", strings.ReplaceAll(params.DriverName, "'", "''")))
 	}
 	if params.PortOrURI != "" {
 		port := params.PortOrURI
@@ -770,14 +761,40 @@ func (p *WindowsPrinter) Update(ctx context.Context, name string, params UpdateP
 			port = fmt.Sprintf("IP_%s", params.PortOrURI)
 			preParts = append(preParts, fmt.Sprintf(
 				"$port = Get-PrinterPort -Name 'IP_%s' -ErrorAction SilentlyContinue; "+
-					"if (-not $port) { Add-PrinterPort -Name 'IP_%s' -PrinterHostAddress '%s' -PortNumber 9100 }",
-				cleanPort, cleanPort, cleanPort,
+					"if (-not $port) { "+
+					"  $OS=[Environment]::OSVersion.Version; "+
+					"  $win7=($OS.Major -lt 6) -or ($OS.Major -eq 6 -and $OS.Minor -lt 2); "+
+					"  if ($win7) { "+
+					"    $scripts=Join-Path $env:windir 'System32\\Printing_Admin_Scripts'; "+
+					"    $locale=(Get-ChildItem -Path $scripts -Directory -ErrorAction SilentlyContinue | Select-Object -First 1).FullName; "+
+					"    cscript //nologo (Join-Path $locale 'prnport.vbs') -a -r 'IP_%s' -h '%s' -o raw -n 9100 "+
+					"  } else { "+
+					"    Add-PrinterPort -Name 'IP_%s' -PrinterHostAddress '%s' -PortNumber 9100 "+
+					"  } "+
+					"}",
+				cleanPort, cleanPort, cleanPort, cleanPort, cleanPort,
 			))
 		}
 		setParts = append(setParts, fmt.Sprintf("-PortName '%s'", strings.ReplaceAll(port, "'", "''")))
+		wmiModifications = append(wmiModifications, fmt.Sprintf("$wp.PortName='%s'", strings.ReplaceAll(port, "'", "''")))
 	}
 
-	ps := strings.Join(append(preParts, strings.Join(setParts, " ")), "; ")
+	wmiScript := "$null"
+	if len(wmiModifications) > 0 {
+		wmiScript = fmt.Sprintf(
+			`$wp=Get-WmiObject -Class Win32_Printer -Filter "Name='%s'"; if ($wp) { %s; [void]$wp.Put() }`,
+			cleanName, strings.Join(wmiModifications, "; "),
+		)
+	}
+
+	modernPS := strings.Join(append(preParts, strings.Join(setParts, " ")), "; ")
+	ps := fmt.Sprintf(
+		`$OS=[Environment]::OSVersion.Version; `+
+			`$win7=($OS.Major -lt 6) -or ($OS.Major -eq 6 -and $OS.Minor -lt 2); `+
+			`if ($win7) { %s } else { %s }`,
+		wmiScript, modernPS,
+	)
+
 	out, err := exec.CommandContext(ctx, "powershell", "-NoProfile", "-NonInteractive", "-Command", ps).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("update printer failed: %s (%w)", strings.TrimSpace(string(out)), err)
