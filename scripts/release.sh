@@ -41,9 +41,10 @@ done
 
 # --- owner/repo dari remote ---
 REMOTE="$(git remote get-url origin)"
-if [[ "$REMOTE" =~ github\.com[:/]([^/]+)/([^/]+?)(\.git)?$ ]]; then
-  REPO="${BASH_REMATCH[1]}/${BASH_REMATCH[2]}"
-else
+REPO="${REMOTE#*github.com/}"
+REPO="${REPO#*github.com:}"
+REPO="${REPO%.git}"
+if [ -z "$REPO" ] || [ "$REPO" = "$REMOTE" ]; then
   echo "Tidak bisa membaca owner/repo dari remote: $REMOTE" >&2
   exit 1
 fi
@@ -98,11 +99,14 @@ LDFLAGS="-s -w -X ${PKG}.Version=${SEMVER} -X ${PKG}.GitCommit=${COMMIT} -X ${PK
 mkdir -p "$OUT_DIR"
 build() {
   local goos=$1 goarch=$2 name=$3
-  local tags=()
-  if [ "$goos" != "windows" ]; then tags=(-tags headless); fi
   echo "[release] build $name ($goos/$goarch)"
-  GOOS="$goos" GOARCH="$goarch" CGO_ENABLED=0 \
-    go build "${tags[@]}" -ldflags "$LDFLAGS" -o "${OUT_DIR}/${name}" ./cmd/print-agent
+  if [ "$goos" != "windows" ]; then
+    GOOS="$goos" GOARCH="$goarch" CGO_ENABLED=0 \
+      go build -tags headless -ldflags "$LDFLAGS" -o "${OUT_DIR}/${name}" ./cmd/print-agent
+  else
+    GOOS="$goos" GOARCH="$goarch" CGO_ENABLED=0 \
+      go build -ldflags "$LDFLAGS" -o "${OUT_DIR}/${name}" ./cmd/print-agent
+  fi
 }
 build windows amd64 print-agent-windows-amd64.exe
 build windows 386   print-agent-windows-386.exe
