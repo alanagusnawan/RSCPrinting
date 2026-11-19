@@ -67,3 +67,17 @@ func TestPSRawScript(t *testing.T) {
 		}
 	}
 }
+
+func TestPSConnectionScript(t *testing.T) {
+	script := psConnectionScript(`\\SERVER\Share`)
+	for _, want := range []string{
+		"$win7=",
+		"AddWindowsPrinterConnection",
+		"Add-Printer",
+		"-ConnectionName '\\\\SERVER\\Share'",
+	} {
+		if !strings.Contains(script, want) {
+			t.Errorf("psConnectionScript missing %q\nscript:\n%s", want, script)
+		}
+	}
+}

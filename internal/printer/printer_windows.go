@@ -568,11 +568,38 @@ func psRawScript(name, driver, host string, port int) string {
 }
 
 func psIPPScript(name, url string) string {
-	return fmt.Sprintf(`Add-Printer -Name '%s' -IppURL '%s' -ErrorAction Stop`, escapePS(name), escapePS(url))
+	return fmt.Sprintf(
+		`$OS=[Environment]::OSVersion.Version; `+
+			`$win7=($OS.Major -lt 6) -or ($OS.Major -eq 6 -and $OS.Minor -lt 2); `+
+			`if ($win7) { `+
+			`(New-Object -ComObject WScript.Network).AddWindowsPrinterConnection('%s') `+
+			`} else { `+
+			`try { `+
+			`Add-Printer -Name '%s' -IppURL '%s' -ErrorAction Stop `+
+			`} catch { `+
+			`# Fallback jika Add-Printer -IppURL gagal (misal 0x80070bc4 / Internet Printing Client belum aktif) `+
+			`try { (New-Object -ComObject WScript.Network).AddWindowsPrinterConnection('%s') } catch { throw $_.Exception.Message } `+
+			`} `+
+			`}`,
+		escapePS(url),
+		escapePS(name),
+		escapePS(url),
+		escapePS(url),
+	)
 }
 
 func psConnectionScript(url string) string {
-	return fmt.Sprintf(`Add-Printer -ConnectionName '%s' -ErrorAction Stop`, escapePS(url))
+	return fmt.Sprintf(
+		`$OS=[Environment]::OSVersion.Version; `+
+			`$win7=($OS.Major -lt 6) -or ($OS.Major -eq 6 -and $OS.Minor -lt 2); `+
+			`if ($win7) { `+
+			`(New-Object -ComObject WScript.Network).AddWindowsPrinterConnection('%s') `+
+			`} else { `+
+			`Add-Printer -ConnectionName '%s' -ErrorAction Stop `+
+			`}`,
+		escapePS(url),
+		escapePS(url),
+	)
 }
 
 // Register memasang queue printer. Idempotent: bila printer sudah ada,
@@ -610,8 +637,20 @@ func (p *WindowsPrinter) Register(ctx context.Context, params RegisterPrinterPar
 		if driver == "" {
 			driver = "Generic / Text Only"
 		}
-		psScript = fmt.Sprintf("Add-Printer -Name '%s' -DriverName '%s' -PortName '%s' -ErrorAction Stop",
-			escapePS(params.Name), escapePS(driver), escapePS(endpoint))
+		psScript = fmt.Sprintf(
+			`$OS=[Environment]::OSVersion.Version; `+
+				`$win7=($OS.Major -lt 6) -or ($OS.Major -eq 6 -and $OS.Minor -lt 2); `+
+				`if ($win7) { `+
+				`$scripts=Join-Path $env:windir 'System32\Printing_Admin_Scripts'; `+
+				`$locale=(Get-ChildItem -Path $scripts -Directory -ErrorAction SilentlyContinue | Select-Object -First 1).FullName; `+
+				`cscript //nologo (Join-Path $locale 'prnmngr.vbs') -a -p '%s' -m '%s' -r '%s'; `+
+				`if ($LASTEXITCODE -ne 0) { throw "prnmngr.vbs gagal (exit $LASTEXITCODE)" } `+
+				`} else { `+
+				`Add-Printer -Name '%s' -DriverName '%s' -PortName '%s' -ErrorAction Stop `+
+				`}`,
+			escapePS(params.Name), escapePS(driver), escapePS(endpoint),
+			escapePS(params.Name), escapePS(driver), escapePS(endpoint),
+		)
 
 	default:
 		host, port, ok := parseRawEndpoint(endpoint)

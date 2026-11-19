@@ -14,15 +14,14 @@ agent:
   id: "" # UUID, generate otomatis jika kosong (disimpan di ./data/config)
   displayName: "" # "Kasir Depan" dsb.
 printers:
-  defaultName: "Thermal"
-  allowlist:
-    - Thermal
+  defaultName: ""
+  allowlist: [] # kosong = izinkan semua printer
   pollInterval: 5m # deteksi perubahan daftar printer
   share:
     enabled: true
     protocol: auto
     namePattern: "RSC-%s"
-    relayEnabled: false
+    relayEnabled: true
     relayIppEnabled: true # listener IPP 1 port (multi-printer)
     relayPort: 19100
     relayRawEnabled: true # listener RAW per printer (Windows 7-11)
