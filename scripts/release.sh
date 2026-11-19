@@ -132,6 +132,11 @@ git push origin "$TAG"
 # --- release via REST API ---
 TOKEN="${GH_TOKEN:-${GITHUB_TOKEN:-}}"
 if [ -z "$TOKEN" ]; then
+  # Fallback: ambil token dari git credential helper jika tersedia
+  TOKEN="$(printf "protocol=https\nhost=github.com\n" | git credential fill 2>/dev/null | awk -F= '$1=="password"{print $2}')"
+fi
+
+if [ -z "$TOKEN" ]; then
   echo "Token tidak ada. Set GH_TOKEN (atau GITHUB_TOKEN)." >&2
   exit 1
 fi
