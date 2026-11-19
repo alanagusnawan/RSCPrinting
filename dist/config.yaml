@@ -1,29 +1,58 @@
-mode: agent # agent | standalone
+mode: agent  # agent | standalone
 
 server:
-  host: 127.0.0.1 # 127.0.0.1 untuk production; 0.0.0.0 hanya untuk debugging LAN
+  host: 127.0.0.1  # 127.0.0.1 untuk production; 0.0.0.0 hanya untuk debugging LAN
   port: 8080
-  enable_local_print_endpoint: true # aktifkan hanya untuk standalone / testing
+  enable_local_print_endpoint: false  # aktifkan hanya untuk standalone / testing
 
 ws_server:
-  url: "" # kosong = baca dari ./data/config atau env PRINT_AGENT_WS_URL (default: ws://localhost:5488/agent/ws)
-  token: "" # kosong = generate otomatis dan simpan di ./data/config atau env PRINT_AGENT_WS_TOKEN
+  url: ""  # kosong = baca dari ./data/config atau env PRINT_AGENT_WS_URL (default: ws://localhost:5488/agent/ws)
+  token: ""  # kosong = generate otomatis dan simpan di ./data/config atau env PRINT_AGENT_WS_TOKEN
   reconnectBackoffMax: 60s
   handshakeTimeout: 15s
   pingInterval: 30s
   welcomeTimeout: 10s
 
 agent:
-  id: "" # UUID, generate otomatis jika kosong (disimpan di ./data/config)
-  displayName: "" # "Kasir Depan" dsb.
+  id: ""              # UUID, generate otomatis jika kosong (disimpan di ./data/config)
+  displayName: ""     # "Kasir Depan" dsb.
 
 printers:
   defaultName: ""
   allowlist: []
-  pollInterval: 5m # deteksi perubahan daftar printer
+  pollInterval: 5m    # deteksi perubahan daftar printer
+  # Printer ESC/POS (thermal struk) dirender ke raster ESC/POS, melewati driver OS
+  # sehingga menghindari output rusak (EJL/ESC/P-R) dari driver class/v4.
+  thermal: []
+  # thermal:
+  #   - name: "Thermal"   # cocokkan persis nama queue di OS
+  #     widthMm: 80        # 58 | 80
+  #     dpi: 203
+  #     cut: true          # auto-cut di akhir
+  #     trim: true         # pangkas margin putih (default true)
+  #     feed: 100          # feed (dot) sebelum cut (default 100 ≈ 18.75mm)
+
+  # Berbagi printer lintas-komputer (komputer B mencetak lewat printer komputer A).
+  share:
+    enabled: true          # auto-share printer di allowlist saat agent start
+    protocol: auto         # auto | smb | ipp
+    namePattern: "RSC-%s"  # pola nama share OS
+    relayEnabled: false    # Model 2: buka listener agar device lain bisa mencetak
+    relayIppEnabled: true  # listener IPP 1 port (multi-printer, driverless)
+    relayPort: 19100       # port IPP
+    relayRawEnabled: true  # listener RAW per printer (Windows 7-11)
+    relayRawBase: 19101    # port dasar RAW
 
 ghostscript:
-  path: "" # kosong = auto-detect (Windows)
+  path: ""  # kosong = auto-detect (Windows)
+
+office:
+  enabled: true   # konversi dokumen Office (docx/xlsx/pptx) via LibreOffice headless
+  path: ""        # kosong = auto-detect soffice/soffice.exe
+
+document:
+  allowRaw: true  # izinkan pengiriman byte mentah (ESC/POS, PCL, ZPL) langsung ke printer
+  convertTimeout: 60s  # timeout konversi Office
 
 logging:
   level: info
@@ -36,13 +65,25 @@ queue:
   maxConcurrentPerPrinter: 1
 
 updater:
-  enabled: true
-  owner: "alanagusnawan"
-  repo: "RSCPrinting"
-  token: "" # token opsional / isi jika private repo
+  enabled: false
+  owner: ""
+  repo: ""
+  token: ""
   checkInterval: 6h
   prerelease: false
 
 tray:
   enabled: true
   startMinimized: true
+
+# Provisioning driver (dipakai scripts/install.ps1 & deploy-printers.ps1).
+# Nilai ini menjadi default CLI; parameter skrip menimpanya.
+provision:
+  driverSource: "local"           # github | url | local
+  apdDir: "dist"                   # folder installer APD lokal (relatif ke root repo)
+  assetPattern: "*APD*.exe"        # pola nama file installer
+  githubRepo: "alanagusnawan/RSCPrinting"
+  githubTag: "drivers"             # tag rilis berisi aset driver (bila driverSource=github)
+  url: ""                          # bila driverSource=url (mis. URL Epson)
+  sha256: ""                       # opsional, verifikasi unduhan
+  thermalDriverPattern: "*TM-T82*" # pola nama driver APD terpasang

@@ -25,6 +25,7 @@ ASSETS=(
   print-agent-linux-arm64
   print-agent-darwin-amd64
   print-agent-darwin-arm64
+  config.yaml
 )
 
 VERSION=""
@@ -114,6 +115,13 @@ build linux   amd64 print-agent-linux-amd64
 build linux   arm64 print-agent-linux-arm64
 build darwin  amd64 print-agent-darwin-amd64
 build darwin  arm64 print-agent-darwin-arm64
+
+# Copy template config.yaml ke dist jika ada
+if [ -f "configs/config.example.yaml" ]; then
+  cp configs/config.example.yaml "${OUT_DIR}/config.yaml"
+elif [ -f "configs/config.yaml" ]; then
+  cp configs/config.yaml "${OUT_DIR}/config.yaml"
+fi
 
 # --- checksums (format dua spasi, nama file tanpa prefix) ---
 (cd "$OUT_DIR" && sha256sum "${ASSETS[@]}" > checksums.txt)
