@@ -388,6 +388,7 @@ func cmdService(args []string) {
 				}
 				dataAbs = dd
 			}
+			_ = agentsvc.EnsureSpoolerService()
 			if err := agentsvc.InstallUserAutorun(configAbs, dataAbs); err != nil {
 				fmt.Fprintf(os.Stderr, "install user autorun failed: %v\n", err)
 				os.Exit(1)
@@ -421,6 +422,7 @@ func cmdService(args []string) {
 
 	switch action {
 	case "install":
+		_ = agentsvc.EnsureSpoolerService()
 		if err := s.Install(); err != nil {
 			fmt.Fprintf(os.Stderr, "install service failed: %v\n", err)
 			os.Exit(1)

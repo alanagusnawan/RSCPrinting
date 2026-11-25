@@ -53,6 +53,10 @@ func StatusService(svc service.Service) (service.Status, error) {
 	return svc.Status()
 }
 
+func EnsureSpoolerService() error {
+	return ensureWindowsSpooler()
+}
+
 func InstallUserAutorun(configPath, dataDir string) error {
 	exe, err := os.Executable()
 	if err != nil {

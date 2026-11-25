@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -233,9 +234,22 @@ func (p *UnixPrinter) Info(ctx context.Context, name string) (PrinterInfo, error
 	return PrinterInfo{}, ErrPrinterNotFound
 }
 
+// ensureCUPSDaemon memastikan service daemon CUPS aktif di Linux / macOS.
+func ensureCUPSDaemon(ctx context.Context) {
+	switch runtime.GOOS {
+	case "linux":
+		// Coba start service cups via systemctl / service jika tidak running
+		_ = exec.CommandContext(ctx, "systemctl", "start", "cups").Run()
+	case "darwin":
+		// macOS: CUPS dijalankan oleh launchd; pastikan loaded jika mati
+		_ = exec.CommandContext(ctx, "launchctl", "start", "org.cups.cupsd").Run()
+	}
+}
+
 // Register memasang queue CUPS. Idempotent: bila queue sudah ada, konfigurasi
 // diperbarui (lpadmin -p ... -v ... -E).
 func (p *UnixPrinter) Register(ctx context.Context, params RegisterPrinterParams) error {
+	ensureCUPSDaemon(ctx)
 	if params.Name == "" {
 		return fmt.Errorf("printer name required")
 	}

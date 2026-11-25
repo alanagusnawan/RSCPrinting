@@ -604,6 +604,21 @@ function Update-AgentConfig {
     }
 }
 
+function Ensure-PrintSpooler {
+    Write-Log 'Memastikan Print Spooler aktif dan berjalan...'
+    try {
+        Set-Service -Name Spooler -StartupType Automatic -ErrorAction SilentlyContinue
+        $sp = Get-Service -Name Spooler -ErrorAction SilentlyContinue
+        if ($sp -and $sp.Status -ne 'Running') {
+            Start-Service -Name Spooler -ErrorAction SilentlyContinue
+            Start-Sleep -Seconds 1
+        }
+    }
+    catch {
+        Write-Log "Gagal mengatur service Spooler: $($_.Exception.Message)" 'WARN'
+    }
+}
+
 function Install-AgentService {
     Write-Log "Install agent autorun (mode=$Autorun)."
 
@@ -653,6 +668,7 @@ function Install-AgentService {
 
 Write-Log "=== Deploy RSCPrinting mulai ==="
 Assert-Administrator
+Ensure-PrintSpooler
 
 $script:Caps = Get-Capabilities
 $script:ThermalDriver = $ThermalDriver

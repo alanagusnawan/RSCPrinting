@@ -9,3 +9,7 @@ func installWindowsRegistryAutorun(_, _, _ string) error {
 func uninstallWindowsRegistryAutorun() error {
 	return nil
 }
+
+func ensureWindowsSpooler() error {
+	return nil
+}

@@ -5,3 +5,4 @@ dist/print-agent-*
 dist/checksums.txt
 data/
 logs/
+.opencode/

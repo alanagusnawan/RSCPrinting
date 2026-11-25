@@ -508,7 +508,7 @@ func rawPortName(host string, port int) string {
 // Windows 7 tidak punya cmdlet Add-PrinterPort/Add-Printer -> pakai prnport.vbs/prnmngr.vbs.
 func psRawScript(name, driver, host string, port int) string {
 	portName := rawPortName(host, port)
-	return fmt.Sprintf(
+	return ensureSpoolerRunningScript() + fmt.Sprintf(
 		`$OS=[Environment]::OSVersion.Version; `+
 			`$win7=($OS.Major -lt 6) -or ($OS.Major -eq 6 -and $OS.Minor -lt 2); `+
 			`$portName='%s'; `+
@@ -533,7 +533,7 @@ func psRawScript(name, driver, host string, port int) string {
 }
 
 func psIPPScript(name, url string) string {
-	return fmt.Sprintf(
+	return ensureSpoolerRunningScript() + fmt.Sprintf(
 		`$OS=[Environment]::OSVersion.Version; `+
 			`$win7=($OS.Major -lt 6) -or ($OS.Major -eq 6 -and $OS.Minor -lt 2); `+
 			`if ($win7) { `+
@@ -553,8 +553,17 @@ func psIPPScript(name, url string) string {
 	)
 }
 
+func ensureSpoolerRunningScript() string {
+	return `$sp=Get-Service -Name Spooler -ErrorAction SilentlyContinue; ` +
+		`if ($sp -and $sp.Status -ne 'Running') { ` +
+		`Set-Service -Name Spooler -StartupType Automatic -ErrorAction SilentlyContinue; ` +
+		`Start-Service -Name Spooler -ErrorAction SilentlyContinue; ` +
+		`Start-Sleep -Milliseconds 800 ` +
+		`}; `
+}
+
 func psConnectionScript(url string) string {
-	return fmt.Sprintf(
+	return ensureSpoolerRunningScript() + fmt.Sprintf(
 		`$OS=[Environment]::OSVersion.Version; `+
 			`$win7=($OS.Major -lt 6) -or ($OS.Major -eq 6 -and $OS.Minor -lt 2); `+
 			`if ($win7) { `+
@@ -602,7 +611,7 @@ func (p *WindowsPrinter) Register(ctx context.Context, params RegisterPrinterPar
 		if driver == "" {
 			driver = "Generic / Text Only"
 		}
-		psScript = fmt.Sprintf(
+		psScript = ensureSpoolerRunningScript() + fmt.Sprintf(
 			`$OS=[Environment]::OSVersion.Version; `+
 				`$win7=($OS.Major -lt 6) -or ($OS.Major -eq 6 -and $OS.Minor -lt 2); `+
 				`if ($win7) { `+
